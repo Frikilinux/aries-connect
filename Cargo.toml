@@ -1,0 +1,50 @@
+[package]
+name = "aries-connect"
+version = "0.1.0"
+edition = "2021"
+description = "AriesConnect: KDE Connect-compatible daemon exposing devices over D-Bus (no KDE/Qt dependencies)"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+    tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "fs",
+    "signal",
+] }
+socket2 = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pki-types = "1"
+rcgen = { version = "0.13", default-features = false, features = [
+    "pem",
+    "ring",
+] }
+rsa = { version = "0.9" }
+rand = "0.8"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+if-addrs = "0.15.0"
+sha2 = "0.11.1"
+hex = "0.4.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
