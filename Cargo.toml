@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "AriesConnect: KDE Connect-compatible daemon exposing devices over D-Bus (no KDE/Qt dependencies)"
 license = "GPL-2.0-or-later"
+repository = "https://github.com/Frikilinux/aries-connect"
+readme = "README.md"
 
 [dependencies]
     tokio = { version = "1", features = [
