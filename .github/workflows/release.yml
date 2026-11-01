@@ -69,6 +69,7 @@ jobs:
           install -Dm755 target/release/aries-connect "dist/$name/aries-connect"
           install -Dm644 README.md LICENSE -t "dist/$name"
           cp -r doc "dist/$name/doc"
+          cp -r contrib "dist/$name/contrib"
           tar -C dist -czf "$name.tar.gz" "$name"
 
       - name: Checksums
