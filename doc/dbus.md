@@ -15,20 +15,27 @@ directory.
 | `AcceptPairing(deviceId)` | `s`       | Accepts the pending pairing request               |
 | `RejectPairing(deviceId)` | `s`       | Rejects the pending pairing request               |
 | `Devices()`               | `-`       | Lists known devices as `(id, name, paired, connected)` — `a(ssbb)` |
+| `ActiveNotifications()`   | `-`       | Lists active notifications as `(deviceId, id, appName, title, text)` — `a(sssss)` |
+| `DismissNotification(deviceId, notificationId)` | `ss` | Dismisses a notification locally and on the phone |
 
 ## Signals
 
 Every signal carries two strings; the second is context and is empty when
-unused.
+unused. Notification signals carry their own payloads.
 
-| Signal             | Payload                | Meaning                                     |
-| ------------------ | ---------------------- | ------------------------------------------- |
-| `DeviceSeen`       | `(id, name)`           | A device appeared over UDP                  |
-| `Connected`        | `(id, "")`             | Control channel established and identified  |
-| `Disconnected`     | `(id, "")`             | Control channel closed                      |
-| `PairingRequested` | `(id, name)`           | A pairing decision is required              |
-| `PairingAccepted`  | `(id, "")`             | Pairing completed                           |
-| `PairingRejected`  | `(id, reason)`         | Pairing rejected, cancelled or timed out    |
+| Signal                  | Payload                              | Meaning                                     |
+| ----------------------- | ------------------------------------ | ------------------------------------------- |
+| `DeviceSeen`            | `(id, name)`                         | A device appeared over UDP                  |
+| `Connected`             | `(id, "")`                           | Control channel established and identified  |
+| `Disconnected`          | `(id, "")`                           | Control channel closed                      |
+| `PairingRequested`      | `(id, name)`                         | A pairing decision is required              |
+| `PairingAccepted`       | `(id, "")`                           | Pairing completed                           |
+| `PairingRejected`       | `(id, reason)`                       | Pairing rejected, cancelled or timed out    |
+| `NotificationReceived`  | `(deviceId, id, appName, title, text)` | The phone posted a notification           |
+| `NotificationDismissed` | `(deviceId, id)`                     | A notification was dismissed                |
+
+Notifications are kept in memory across reconnects (Android replaces its socket
+frequently); they are cleared when the device is unpaired.
 
 ## Pairing flow
 
@@ -51,4 +58,12 @@ busctl --user monitor dev.zotta.AriesConnect
 # accept a pending pairing request
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
   dev.zotta.AriesConnect AcceptPairing s <deviceId>
+
+# list active notifications
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect ActiveNotifications
+
+# dismiss a notification on the phone as well
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect DismissNotification ss <deviceId> <notificationId>
 ```

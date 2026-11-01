@@ -16,7 +16,12 @@ Both sockets bind `0.0.0.0` with `SO_REUSEADDR`.
 
 - Every device periodically broadcasts its identity as a plain JSON packet.
 - AriesConnect broadcasts to `255.255.255.255`, the directed broadcast of each
-  IPv4 interface (e.g. `192.168.1.255`) and loopback.
+  IPv4 interface (e.g. `192.168.1.255`) and loopback. It also remembers the last
+  address of every peer and announces to it **unicast**, because Android may
+  filter broadcast/multicast traffic while the screen is off.
+- The last address of every **paired** device is persisted in
+  `trusted_devices.json`, so unicast announcements can resume right after a
+  daemon restart.
 - On receiving an identity it answers the exact source address **and** the
   source IP on port 1716, in both plain JSON and the legacy
   `kdeconnect.`-prefixed form. Android sends discovery datagrams from ephemeral
@@ -41,8 +46,23 @@ The phone is always the TCP initiator; AriesConnect only accepts connections.
 4. From then on, packets are newline-delimited JSON. A packet is
    `{"id": <ms>, "type": "...", "body": {...}}`.
 
-Implemented packet types: `kdeconnect.identity`, `kdeconnect.pair`. Unsupported
-types are ignored (debug log).
+Implemented packet types: `kdeconnect.identity`, `kdeconnect.pair` and
+`kdeconnect.notification`; `kdeconnect.notification.request` is sent to dismiss
+notifications on the phone. Unsupported types are ignored (debug log).
+
+## Notifications
+
+Notifications are mirrored only for **paired** devices. The phone sends one
+`kdeconnect.notification` packet per posted notification and another one with
+`isCancel: true` when it is dismissed.
+
+Relevant body fields: `id` (string or number), `appName`, `title`, `text`,
+`time` (milliseconds) and `isCancel`. The daemon stores up to 100 entries per
+device and drops the oldest first.
+
+Dismissing from the desktop sends `kdeconnect.notification.request` with
+`{"cancel": "<id>"}`. The local mirror is removed immediately; the phone may
+ignore the request for non-clearable notifications.
 
 ## Trust model
 

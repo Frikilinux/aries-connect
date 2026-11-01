@@ -30,7 +30,7 @@ State lives in `$AC_DATA_DIR` (default `~/.local/share/aries-connect/`):
 | ---------------------- | ----------------------------------------------- |
 | `cert.pem` / `key.pem` | Self-signed RSA-2048 identity certificate       |
 | `device_id`            | 32-character KDE Connect device id              |
-| `trusted_devices.json` | Paired devices with certificate SHA-256 fingerprint |
+| `trusted_devices.json` | Paired devices with certificate SHA-256 fingerprint and last known IPv4 |
 
 Deleting the state directory resets the identity: the phone will see a new
 device and must pair again.
@@ -63,3 +63,8 @@ Unpairing from the phone removes the device from `trusted_devices.json`.
   writable; the daemon then falls back to an ephemeral id.
 - **The certificate warning appears again**: the state directory was deleted or
   recreated.
+- **Notifications stop when the phone screen is off**: Android is suspending the
+  KDE Connect app or filtering its network traffic. Set the app's battery usage
+  to unrestricted, enable its persistent notification and keep Wi-Fi active
+  during sleep. The daemon also announces unicast to the peer's last address to
+  help it reconnect, but it cannot keep the app alive.

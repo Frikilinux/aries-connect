@@ -11,5 +11,6 @@ pub mod core {
 }
 pub mod dbus;
 pub mod identity;
+pub mod plugins;
 pub mod tls;
 pub mod trusted;

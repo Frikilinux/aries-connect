@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Notification mirroring (`kdeconnect.notification`): active notifications from
+  paired devices are exposed over D-Bus with `ActiveNotifications`,
+  `NotificationReceived` and `NotificationDismissed`.
+- `DismissNotification` forwards dismissals to the phone through
+  `kdeconnect.notification.request`.
+- Unicast discovery announcements to the last known address of each peer, so
+  Android devices reconnect while the screen is off and broadcasts are filtered.
+- The last known IPv4 address of paired devices is persisted in
+  `trusted_devices.json` and used to seed unicast discovery after a restart.
+
+### Changed
+
+- Link closures are logged at info level with the device id.
+
 ## [0.1.0] - 2026-10-31
 
 ### Added

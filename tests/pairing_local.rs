@@ -152,6 +152,134 @@ async fn pairing_accept_flow_works() {
     assert!(peer.connected);
 }
 
+/// Simulated `kdeconnect.notification` packet.
+fn notification_packet(id: &str, title: &str) -> NetworkPacket {
+    NetworkPacket::new(
+        "kdeconnect.notification",
+        serde_json::json!({
+            "id": id,
+            "appName": "Test App",
+            "title": title,
+            "text": "body",
+            "isClearable": true,
+            "time": "1",
+        }),
+    )
+}
+
+/// Simulated dismissal coming from the phone.
+fn cancel_packet(id: &str) -> NetworkPacket {
+    NetworkPacket::new(
+        "kdeconnect.notification",
+        serde_json::json!({ "id": id, "isCancel": true }),
+    )
+}
+
+/// Waits for the first event matching `predicate`.
+async fn wait_event<F>(events: &mut UnboundedReceiver<Event>, mut predicate: F) -> Event
+where
+    F: FnMut(&Event) -> bool,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match events.recv().await {
+                Some(event) if predicate(&event) => return event,
+                Some(_) => {}
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("expected event before the timeout")
+}
+
+#[tokio::test]
+async fn notification_flow_works() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    app.mark_paired(PHONE_ID).await;
+
+    send_packet(&mut reader, &notification_packet("n1", "Hello")).await;
+    let event = wait_event(&mut events, |e| {
+        matches!(e, Event::NotificationReceived { .. })
+    })
+    .await;
+    match event {
+        Event::NotificationReceived {
+            device_id,
+            id,
+            app_name,
+            title,
+            text,
+        } => {
+            assert_eq!(device_id, PHONE_ID);
+            assert_eq!(id, "n1");
+            assert_eq!(app_name, "Test App");
+            assert_eq!(title, "Hello");
+            assert_eq!(text, "body");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let active = app.notifications.list().await;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].0, PHONE_ID);
+    assert_eq!(active[0].1.id, "n1");
+
+    // Dismissal from the desktop: removed locally, forwarded to the phone.
+    assert!(app.dismiss_notification(PHONE_ID, "n1").await);
+    let dismiss = tokio::time::timeout(Duration::from_secs(5), read_packet(&mut reader))
+        .await
+        .expect("dismiss packet");
+    assert_eq!(dismiss.packet_type, "kdeconnect.notification.request");
+    assert_eq!(
+        dismiss.body.get("cancel").and_then(|v| v.as_str()),
+        Some("n1")
+    );
+    assert!(app.notifications.list().await.is_empty());
+    wait_event(&mut events, |e| {
+        matches!(e, Event::NotificationDismissed { .. })
+    })
+    .await;
+
+    // Dismissal on the phone removes it from the mirror.
+    send_packet(&mut reader, &notification_packet("n2", "Second")).await;
+    wait_event(
+        &mut events,
+        |e| matches!(e, Event::NotificationReceived { id, .. } if id == "n2"),
+    )
+    .await;
+    send_packet(&mut reader, &cancel_packet("n2")).await;
+    let event = wait_event(
+        &mut events,
+        |e| matches!(e, Event::NotificationDismissed { id, .. } if id == "n2"),
+    )
+    .await;
+    assert!(matches!(event, Event::NotificationDismissed { .. }));
+    assert!(app.notifications.list().await.is_empty());
+}
+
+#[tokio::test]
+async fn notifications_from_unpaired_devices_are_ignored() {
+    let (_app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    send_packet(&mut reader, &notification_packet("n1", "Hello")).await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match events.recv().await {
+                Some(Event::NotificationReceived { .. }) => return,
+                Some(_) => {}
+                None => return,
+            }
+        }
+    })
+    .await;
+    assert!(result.is_err(), "unpaired notification must be ignored");
+}
+
 #[tokio::test]
 async fn rejects_old_protocol_versions() {
     let (_, port, _events) = spawn_daemon().await;

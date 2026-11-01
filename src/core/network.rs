@@ -84,11 +84,7 @@ async fn accept_loop(app: Arc<App>, connector: TlsConnector, listener: TcpListen
         let connector = connector.clone();
         tokio::spawn(async move {
             match handle_connection(app.clone(), connector, stream).await {
-                Ok(Some(id)) => {
-                    app.registry.set_connected(&id, false).await;
-                    let _ = app.events.send(Event::Disconnected { id });
-                }
-                Ok(None) => {}
+                Ok(()) => {}
                 Err(e) => {
                     tracing::debug!(%peer, "connection ended: {e}");
                 }
@@ -160,13 +156,12 @@ where
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for packet"))?
 }
 
-/// Runs one connection until EOF. Returns the peer device id if known, so the
-/// caller can mark it disconnected afterwards.
+/// Runs one connection until EOF.
 async fn handle_connection(
     app: Arc<App>,
     connector: TlsConnector,
     mut stream: TcpStream,
-) -> Result<Option<String>, io::Error> {
+) -> Result<(), io::Error> {
     // --- 1. Plaintext identity from the connecting peer -------------------
     let plain_line =
         read_plain_line(&mut stream, MAX_IDENTITY_BYTES, PLAINTEXT_IDENTITY_TIMEOUT).await?;
@@ -264,6 +259,12 @@ async fn handle_connection(
     }
 
     let peer_id = secure.device_id.clone();
+    tracing::debug!(
+        id = %peer_id,
+        incoming = ?secure.incoming_capabilities,
+        outgoing = ?secure.outgoing_capabilities,
+        "peer capabilities"
+    );
     app.seen(&secure, true).await;
     app.registry.set_connected(&peer_id, true).await;
     tracing::info!(
@@ -317,10 +318,19 @@ async fn handle_connection(
     }
     .await;
 
-    app.unregister_link(&peer_id, generation).await;
+    // Android replaces its socket frequently; only report the disconnect when
+    // the closed link is still the newest one for this device.
+    let was_current = app.unregister_link(&peer_id, generation).await;
     writer_task.abort();
+    if was_current {
+        tracing::info!(device = %peer_id, "control channel closed");
+        app.registry.set_connected(&peer_id, false).await;
+        let _ = app.events.send(Event::Disconnected {
+            id: peer_id.clone(),
+        });
+    }
     loop_result?;
-    Ok(Some(peer_id))
+    Ok(())
 }
 
 fn parse_json(bytes: &[u8], what: &str) -> io::Result<NetworkPacket> {
@@ -348,6 +358,9 @@ async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket
             // Handled in its own task: the decision may take up to 30 s and
             // must not block reading further packets on this connection.
             tokio::spawn(pairing::handle_pair(app.clone(), peer_id, accept));
+        }
+        "kdeconnect.notification" => {
+            crate::plugins::notifications::handle_packet(app, peer_id.as_deref(), &packet).await;
         }
         other => {
             tracing::debug!(unknown = other, "ignoring unsupported packet type");

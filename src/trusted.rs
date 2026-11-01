@@ -18,6 +18,10 @@ pub struct TrustedDevice {
     /// SHA-256 (hex) of the peer certificate seen during pairing.
     #[serde(default)]
     pub cert_sha256: Option<String>,
+    /// Last IPv4 address the device was heard from. Only paired devices are
+    /// stored, and the value is used to announce unicast after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ip: Option<String>,
 }
 
 /// Hex-encoded SHA-256 fingerprint of a DER certificate.
@@ -79,6 +83,24 @@ impl TrustedStore {
         self.persist().await;
     }
 
+    /// Updates the last known address of a trusted device. Only the in-memory
+    /// entry and the persisted file are touched when the address changed.
+    /// Returns whether it changed.
+    pub async fn update_last_ip(&self, id: &str, ip: &str) -> bool {
+        {
+            let mut devices = self.devices.write().await;
+            let Some(device) = devices.get_mut(id) else {
+                return false;
+            };
+            if device.last_ip.as_deref() == Some(ip) {
+                return false;
+            }
+            device.last_ip = Some(ip.to_owned());
+        }
+        self.persist().await;
+        true
+    }
+
     async fn persist(&self) {
         let Some(path) = &self.path else {
             return;
@@ -111,6 +133,7 @@ mod tests {
                 id: "a".repeat(32),
                 name: "Phone".to_owned(),
                 cert_sha256: Some("deadbeef".to_owned()),
+                last_ip: Some("192.168.1.20".to_owned()),
             })
             .await;
 
@@ -119,6 +142,29 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].name, "Phone");
         assert_eq!(all[0].cert_sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(all[0].last_ip.as_deref(), Some("192.168.1.20"));
+    }
+
+    #[tokio::test]
+    async fn updates_last_ip_only_for_known_devices() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = TrustedStore::load(dir.path());
+        store
+            .insert(TrustedDevice {
+                id: "b".repeat(32),
+                name: "Phone".to_owned(),
+                cert_sha256: None,
+                last_ip: None,
+            })
+            .await;
+
+        assert!(!store.update_last_ip(&"c".repeat(32), "192.168.1.30").await);
+        assert!(store.update_last_ip(&"b".repeat(32), "192.168.1.30").await);
+        assert!(!store.update_last_ip(&"b".repeat(32), "192.168.1.30").await);
+
+        let reloaded = TrustedStore::load(dir.path());
+        let device = reloaded.get(&"b".repeat(32)).await.expect("device");
+        assert_eq!(device.last_ip.as_deref(), Some("192.168.1.30"));
     }
 
     #[test]

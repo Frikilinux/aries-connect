@@ -45,6 +45,35 @@ impl AriesConnectIface {
             .map(|d| (d.id, d.name, d.paired, d.connected))
             .collect())
     }
+
+    /// List active notifications as
+    /// (deviceId, notificationId, appName, title, text) tuples.
+    async fn active_notifications(
+        &self,
+    ) -> zbus::fdo::Result<Vec<(String, String, String, String, String)>> {
+        Ok(self
+            .app
+            .notifications
+            .list()
+            .await
+            .into_iter()
+            .map(|(device_id, n)| (device_id, n.id, n.app_name, n.title, n.text))
+            .collect())
+    }
+
+    /// Dismiss a notification locally and on the phone.
+    async fn dismiss_notification(
+        &self,
+        device_id: String,
+        notification_id: String,
+    ) -> zbus::fdo::Result<()> {
+        self.cmd_tx
+            .send(UiCommand::DismissNotification {
+                device_id,
+                notification_id,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
 }
 
 /// Registers the service and returns the command receiver that must be fed
@@ -83,17 +112,66 @@ async fn signal_loop(conn: zbus::Connection, mut events: mpsc::UnboundedReceiver
     };
 
     while let Some(ev) = events.recv().await {
-        let (name, first, second): (&str, String, String) = match ev {
-            Event::DeviceSeen { id, name } => ("DeviceSeen", id, name),
-            Event::Connected { id } => ("Connected", id, String::new()),
-            Event::Disconnected { id } => ("Disconnected", id, String::new()),
-            Event::PairingRequested { id, name } => ("PairingRequested", id, name),
-            Event::PairingAccepted { id } => ("PairingAccepted", id, String::new()),
-            Event::PairingRejected { id, reason } => ("PairingRejected", id, reason),
+        let (name, result) = match ev {
+            Event::DeviceSeen { id, name } => (
+                "DeviceSeen",
+                emitter.emit(DBUS_NAME, "DeviceSeen", &(id, name)).await,
+            ),
+            Event::Connected { id } => (
+                "Connected",
+                emitter
+                    .emit(DBUS_NAME, "Connected", &(id, String::new()))
+                    .await,
+            ),
+            Event::Disconnected { id } => (
+                "Disconnected",
+                emitter
+                    .emit(DBUS_NAME, "Disconnected", &(id, String::new()))
+                    .await,
+            ),
+            Event::PairingRequested { id, name } => (
+                "PairingRequested",
+                emitter
+                    .emit(DBUS_NAME, "PairingRequested", &(id, name))
+                    .await,
+            ),
+            Event::PairingAccepted { id } => (
+                "PairingAccepted",
+                emitter
+                    .emit(DBUS_NAME, "PairingAccepted", &(id, String::new()))
+                    .await,
+            ),
+            Event::PairingRejected { id, reason } => (
+                "PairingRejected",
+                emitter
+                    .emit(DBUS_NAME, "PairingRejected", &(id, reason))
+                    .await,
+            ),
+            Event::NotificationReceived {
+                device_id,
+                id,
+                app_name,
+                title,
+                text,
+            } => (
+                "NotificationReceived",
+                emitter
+                    .emit(
+                        DBUS_NAME,
+                        "NotificationReceived",
+                        &(device_id, id, app_name, title, text),
+                    )
+                    .await,
+            ),
+            Event::NotificationDismissed { device_id, id } => (
+                "NotificationDismissed",
+                emitter
+                    .emit(DBUS_NAME, "NotificationDismissed", &(device_id, id))
+                    .await,
+            ),
         };
 
-        let body = (first, second);
-        if let Err(e) = emitter.emit(DBUS_NAME, name, &body).await {
+        if let Err(e) = result {
             tracing::warn!(signal = name, error = %e, "failed to emit D-Bus signal");
         }
     }
