@@ -74,6 +74,29 @@ impl AriesConnectIface {
             })
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
+
+    /// Whether `plugin` (e.g. `kdeconnect.notification`) is enabled for the
+    /// device. Unknown devices report `false`.
+    async fn plugin_enabled(&self, device_id: String, plugin: String) -> zbus::fdo::Result<bool> {
+        Ok(self.app.trusted.plugin_enabled(&device_id, &plugin).await)
+    }
+
+    /// Enable or disable `plugin` for the device; the change is persisted and
+    /// announced with the `PluginStateChanged` signal.
+    async fn set_plugin_enabled(
+        &self,
+        device_id: String,
+        plugin: String,
+        enabled: bool,
+    ) -> zbus::fdo::Result<()> {
+        self.cmd_tx
+            .send(UiCommand::SetPluginEnabled {
+                device_id,
+                plugin,
+                enabled,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
 }
 
 /// Registers the service and returns the command receiver that must be fed
@@ -167,6 +190,20 @@ async fn signal_loop(conn: zbus::Connection, mut events: mpsc::UnboundedReceiver
                 "NotificationDismissed",
                 emitter
                     .emit(DBUS_NAME, "NotificationDismissed", &(device_id, id))
+                    .await,
+            ),
+            Event::PluginStateChanged {
+                device_id,
+                plugin,
+                enabled,
+            } => (
+                "PluginStateChanged",
+                emitter
+                    .emit(
+                        DBUS_NAME,
+                        "PluginStateChanged",
+                        &(device_id, plugin, enabled),
+                    )
                     .await,
             ),
         };

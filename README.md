@@ -6,8 +6,9 @@ control channel and exposes devices, pairing and events over D-Bus
 (`dev.zotta.AriesConnect`) so any frontend can consume them.
 
 Current status: discovery, pairing with persistent certificate pinning, the
-D-Bus control interface and notification mirroring are implemented. Battery,
-clipboard, ping and other plugins are not implemented yet.
+D-Bus control interface, notification mirroring and per-device plugin
+configuration are implemented. Battery, clipboard, ping and other plugins are
+not implemented yet.
 Distribution packaging is not included; `contrib/` only contains an example
 systemd user unit.
 

@@ -16,9 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kdeconnect.notification.request`.
 - Unicast discovery announcements to the last known address of each peer, so
   Android devices reconnect while the screen is off and broadcasts are filtered.
-- The last known IPv4 address of paired devices is persisted in
-  `trusted_devices.json` and used to seed unicast discovery after a restart.
+- The last known IPv4 address of paired devices is persisted per device
+  (`devices/<id>/device.json`) and used to seed unicast discovery after a
+  restart.
 - Example systemd user unit in `contrib/aries-connect.service`.
+- Per-device plugin config: `PluginEnabled`, `SetPluginEnabled` and the
+  `PluginStateChanged` signal; changes are persisted per device and disabling
+  notifications drops their mirror.
+- Per-device state directories (`devices/<id>/device.json`) with atomic writes,
+  replacing the monolithic trust store (migrated and removed on first start).
 
 ### Changed
 

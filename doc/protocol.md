@@ -19,8 +19,8 @@ Both sockets bind `0.0.0.0` with `SO_REUSEADDR`.
   IPv4 interface (e.g. `192.168.1.255`) and loopback. It also remembers the last
   address of every peer and announces to it **unicast**, because Android may
   filter broadcast/multicast traffic while the screen is off.
-- The last address of every **paired** device is persisted in
-  `trusted_devices.json`, so unicast announcements can resume right after a
+- The last address of every **paired** device is persisted in its
+  `devices/<id>/device.json`, so unicast announcements can resume right after a
   daemon restart.
 - On receiving an identity it answers the exact source address **and** the
   source IP on port 1716, in both plain JSON and the legacy
@@ -52,9 +52,10 @@ notifications on the phone. Unsupported types are ignored (debug log).
 
 ## Notifications
 
-Notifications are mirrored only for **paired** devices. The phone sends one
-`kdeconnect.notification` packet per posted notification and another one with
-`isCancel: true` when it is dismissed.
+Notifications are mirrored only for **paired** devices with their
+`kdeconnect.notification` plugin enabled (see [Per-device plugins](#per-device-plugins)).
+The phone sends one `kdeconnect.notification` packet per posted notification and
+another one with `isCancel: true` when it is dismissed.
 
 Relevant body fields: `id` (string or number), `appName`, `title`, `text`,
 `time` (milliseconds) and `isCancel`. The daemon stores up to 100 entries per
@@ -71,11 +72,27 @@ ignore the request for non-clearable notifications.
   requests expire after 30 s and are rejected.
 - `pair: false` from a peer unpairs the device.
 - On acceptance the peer id, name and certificate SHA-256 fingerprint are stored
-  in `trusted_devices.json`.
+  in the device's `devices/<id>/device.json`.
 - Reconnecting paired devices must present the same certificate; a mismatch is
   rejected.
 - Replies are written through the device's **current** control channel, because
   Android replaces its socket on every discovery broadcast.
+
+## Per-device plugins
+
+Each paired device has its own `devices/<id>/device.json` holding name,
+certificate fingerprint, last known IPv4 address and plugin overrides. Plugins
+listed in `plugins` carry an explicit `false`; anything absent is enabled, so
+defaults keep working as plugins are added. Device files are written atomically
+(temporary file plus rename) and only when a value actually changed.
+
+- `SetPluginEnabled(deviceId, plugin, bool)` toggles one plugin; the change is
+  persisted and announced with the `PluginStateChanged` signal.
+- Disabling notifications drops that device's mirrored notifications;
+  reenabling starts empty.
+- Unpairing deletes the device directory, including its plugin state. Legacy
+  monolithic `trusted_devices.json` files are migrated into `devices/` on load
+  and removed afterwards.
 
 ## Android compatibility
 

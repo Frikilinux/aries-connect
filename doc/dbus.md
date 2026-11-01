@@ -17,6 +17,8 @@ directory.
 | `Devices()`               | `-`       | Lists known devices as `(id, name, paired, connected)` — `a(ssbb)` |
 | `ActiveNotifications()`   | `-`       | Lists active notifications as `(deviceId, id, appName, title, text)` — `a(sssss)` |
 | `DismissNotification(deviceId, notificationId)` | `ss` | Dismisses a notification locally and on the phone |
+| `PluginEnabled(deviceId, plugin)` | `ss` | Whether `plugin` (e.g. `kdeconnect.notification`) is enabled for the device; unknown devices report `false` |
+| `SetPluginEnabled(deviceId, plugin, bool)` | `ssb` | Enables or disables `plugin` for the device; persisted and announced with `PluginStateChanged` |
 
 ## Signals
 
@@ -33,9 +35,12 @@ unused. Notification signals carry their own payloads.
 | `PairingRejected`       | `(id, reason)`                       | Pairing rejected, cancelled or timed out    |
 | `NotificationReceived`  | `(deviceId, id, appName, title, text)` | The phone posted a notification           |
 | `NotificationDismissed` | `(deviceId, id)`                     | A notification was dismissed                |
+| `PluginStateChanged`    | `(deviceId, plugin, enabled)`        | A per-device plugin was toggled             |
 
 Notifications are kept in memory across reconnects (Android replaces its socket
-frequently); they are cleared when the device is unpaired.
+frequently); they are cleared when the device is unpaired or when its
+notifications plugin is disabled. Clients should refresh `ActiveNotifications()`
+when they receive `PluginStateChanged`.
 
 ## Pairing flow
 
@@ -66,4 +71,12 @@ busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
 # dismiss a notification on the phone as well
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
   dev.zotta.AriesConnect DismissNotification ss <deviceId> <notificationId>
+
+# check and toggle the notifications plugin of a device
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect PluginEnabled ss <deviceId> kdeconnect.notification
+
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect SetPluginEnabled ssb <deviceId> \
+  kdeconnect.notification false
 ```

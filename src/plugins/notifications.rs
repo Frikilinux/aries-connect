@@ -154,6 +154,14 @@ pub async fn handle_packet(
         tracing::debug!(device = %device_id, "ignoring notification from an unpaired device");
         return true;
     }
+    if !app
+        .trusted
+        .plugin_enabled(device_id, NOTIFICATION_PACKET)
+        .await
+    {
+        tracing::debug!(device = %device_id, "notifications plugin is disabled for this device");
+        return true;
+    }
     let body: IncomingNotification = match serde_json::from_value(packet.body.clone()) {
         Ok(body) => body,
         Err(e) => {
@@ -216,6 +224,14 @@ pub fn dismiss_packet(id: &str) -> NetworkPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
+    use crate::app::App;
+    use crate::identity::LocalIdentity;
+    use crate::trusted::{TrustedDevice, TrustedStore};
 
     #[test]
     fn parses_android_notification_with_string_time() {
@@ -239,5 +255,52 @@ mod tests {
         assert_eq!(time_to_ms(&serde_json::json!(42)), 42);
         assert_eq!(time_to_ms(&serde_json::json!("42")), 42);
         assert_eq!(time_to_ms(&serde_json::Value::Null), 0);
+    }
+
+    /// Paired device with `plugin` disabled or enabled via per-device overrides.
+    async fn app_with_plugins(plugins: HashMap<String, bool>) -> Arc<App> {
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        app.trusted
+            .insert(TrustedDevice {
+                id: "b".repeat(32),
+                name: "Phone".to_owned(),
+                cert_sha256: None,
+                last_ip: None,
+                plugins,
+            })
+            .await;
+        app
+    }
+
+    #[tokio::test]
+    async fn ignores_notifications_when_plugin_disabled() {
+        let plugins = HashMap::from([(NOTIFICATION_PACKET.to_owned(), false)]);
+        let app = app_with_plugins(plugins).await;
+        let device_id = "b".repeat(32);
+        let packet = NetworkPacket::new(
+            NOTIFICATION_PACKET,
+            serde_json::json!({ "id": "1|app|1|null|1", "appName": "Mail" }),
+        );
+
+        assert!(handle_packet(&app, Some(&device_id), &packet).await);
+        assert!(
+            app.notifications.list().await.is_empty(),
+            "disabled devices must not mirror notifications"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_notifications_when_plugin_enabled() {
+        let app = app_with_plugins(HashMap::new()).await;
+        let device_id = "b".repeat(32);
+        let packet = NetworkPacket::new(
+            NOTIFICATION_PACKET,
+            serde_json::json!({ "id": "1|app|1|null|1", "appName": "Mail" }),
+        );
+
+        assert!(handle_packet(&app, Some(&device_id), &packet).await);
+        assert_eq!(app.notifications.list().await.len(), 1);
     }
 }

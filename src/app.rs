@@ -36,6 +36,12 @@ pub enum Event {
     },
     /// A notification was dismissed, locally or on the phone.
     NotificationDismissed { device_id: String, id: String },
+    /// A per-device plugin was enabled or disabled.
+    PluginStateChanged {
+        device_id: String,
+        plugin: String,
+        enabled: bool,
+    },
 }
 
 /// Commands arriving from the D-Bus interface toward the core.
@@ -46,6 +52,11 @@ pub enum UiCommand {
     DismissNotification {
         device_id: String,
         notification_id: String,
+    },
+    SetPluginEnabled {
+        device_id: String,
+        plugin: String,
+        enabled: bool,
     },
 }
 
@@ -237,6 +248,7 @@ impl App {
                 name,
                 cert_sha256,
                 last_ip: None,
+                plugins: HashMap::new(),
             })
             .await;
     }
@@ -249,8 +261,20 @@ impl App {
     }
 
     /// Dismisses a notification locally and asks the phone to do the same.
-    /// Returns false when the notification is unknown.
+    /// Returns false when the notification is unknown or the notifications
+    /// plugin is disabled for that device.
     pub async fn dismiss_notification(&self, device_id: &str, notification_id: &str) -> bool {
+        if !self
+            .trusted
+            .plugin_enabled(device_id, notifications::NOTIFICATION_PACKET)
+            .await
+        {
+            tracing::debug!(
+                device = %device_id,
+                "notifications plugin is disabled for this device"
+            );
+            return false;
+        }
         if self
             .notifications
             .remove(device_id, notification_id)
@@ -273,6 +297,26 @@ impl App {
             );
         }
         true
+    }
+
+    /// Persists the per-device plugin state. Disabling a plugin also drops its
+    /// active state (mirrored notifications) so clients resync once reenabled.
+    pub async fn set_plugin_enabled(&self, device_id: &str, plugin: &str, enabled: bool) {
+        if plugin == notifications::NOTIFICATION_PACKET && !enabled {
+            self.notifications.clear_device(device_id).await;
+        }
+        if self
+            .trusted
+            .set_plugin_enabled(device_id, plugin, enabled)
+            .await
+        {
+            tracing::info!(device = %device_id, plugin = %plugin, %enabled, "plugin state changed");
+            self.emit(Event::PluginStateChanged {
+                device_id: device_id.to_owned(),
+                plugin: plugin.to_owned(),
+                enabled,
+            });
+        }
     }
 
     /// Persists the last address of a paired device so unicast discovery can
@@ -413,6 +457,19 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                         "unknown notification"
                     );
                 }
+            }
+            UiCommand::SetPluginEnabled {
+                device_id,
+                plugin,
+                enabled,
+            } => {
+                tracing::info!(
+                    device = %device_id,
+                    plugin = %plugin,
+                    %enabled,
+                    "set_plugin_enabled"
+                );
+                app.set_plugin_enabled(&device_id, &plugin, enabled).await;
             }
         }
     }
