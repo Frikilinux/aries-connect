@@ -82,6 +82,23 @@ impl AriesConnectIface {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
+    /// Ping a device; `message` is optional and may be empty. Fails when the
+    /// device is not paired, the plugin is disabled or it is not connected.
+    async fn ping_device(&self, device_id: String, message: String) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(UiCommand::Ping {
+                device_id,
+                message,
+                reply,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
     /// Whether `plugin` (e.g. `kdeconnect.notification`) is enabled for the
     /// device. Unknown devices report `false`.
     async fn plugin_enabled(&self, device_id: String, plugin: String) -> zbus::fdo::Result<bool> {
@@ -197,6 +214,12 @@ async fn signal_loop(conn: zbus::Connection, mut events: mpsc::UnboundedReceiver
                 "NotificationDismissed",
                 emitter
                     .emit(DBUS_NAME, "NotificationDismissed", &(device_id, id))
+                    .await,
+            ),
+            Event::PingReceived { device_id, message } => (
+                "PingReceived",
+                emitter
+                    .emit(DBUS_NAME, "PingReceived", &(device_id, message))
                     .await,
             ),
             Event::PluginStateChanged {

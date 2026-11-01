@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Ping plugin (`kdeconnect.ping`): `PingDevice(deviceId, message)` pings a
+  paired device and fails with a D-Bus error when it cannot be delivered;
+  incoming pings are announced with the `PingReceived` signal. `kdeconnect.ping`
+  is advertised in the identity capabilities and can be toggled per device like
+  any other plugin.
+
 ### Changed
 
 - Binary release archives now ship the `contrib/` directory.

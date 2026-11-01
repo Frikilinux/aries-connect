@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 
-use aries_connect::app::{App, Event, PairDecision};
+use aries_connect::app::{App, Event, PairDecision, PingError};
 use aries_connect::identity::{pair_packet, parse_identity, LocalIdentity, NetworkPacket};
 use aries_connect::tls::IdentityCertificate;
 
@@ -280,6 +280,11 @@ async fn notifications_from_unpaired_devices_are_ignored() {
     assert!(result.is_err(), "unpaired notification must be ignored");
 }
 
+/// Simulated `kdeconnect.ping` packet.
+fn phone_ping(message: &str) -> NetworkPacket {
+    NetworkPacket::new("kdeconnect.ping", serde_json::json!({ "message": message }))
+}
+
 #[tokio::test]
 async fn rejects_old_protocol_versions() {
     let (_, port, _events) = spawn_daemon().await;
@@ -351,4 +356,100 @@ async fn peer_unpair_does_not_echo_pair_packet() {
         echo.is_err(),
         "peer-initiated unpair must not send a pair packet back"
     );
+}
+
+#[tokio::test]
+async fn ping_flow_works() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    app.mark_paired(PHONE_ID).await;
+
+    // Phone -> desktop: the ping is surfaced over D-Bus.
+    send_packet(&mut reader, &phone_ping("Hello from the phone")).await;
+    let event = wait_event(&mut events, |e| matches!(e, Event::PingReceived { .. })).await;
+    match event {
+        Event::PingReceived { device_id, message } => {
+            assert_eq!(device_id, PHONE_ID);
+            assert_eq!(message, "Hello from the phone");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    // Desktop -> phone: the packet carries the message. The link is published
+    // shortly after the identity exchange, so give the task a moment.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    app.send_ping(PHONE_ID, "Hello from the desktop")
+        .await
+        .expect("ping delivered");
+    let packet = tokio::time::timeout(Duration::from_secs(5), read_packet(&mut reader))
+        .await
+        .expect("ping reaches the phone");
+    assert_eq!(packet.packet_type, "kdeconnect.ping");
+    assert_eq!(
+        packet.body.get("message").and_then(|v| v.as_str()),
+        Some("Hello from the desktop")
+    );
+}
+
+#[tokio::test]
+async fn pings_from_unpaired_devices_are_ignored() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    send_packet(&mut reader, &phone_ping("Hello")).await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match events.recv().await {
+                Some(Event::PingReceived { .. }) => return,
+                Some(_) => {}
+                None => return,
+            }
+        }
+    })
+    .await;
+    assert!(result.is_err(), "unpaired ping must be ignored");
+
+    // The desktop cannot ping it either.
+    assert_eq!(
+        app.send_ping(PHONE_ID, "Hello").await,
+        Err(PingError::NotPaired)
+    );
+}
+
+#[tokio::test]
+async fn disabled_ping_plugin_blocks_both_directions() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    app.mark_paired(PHONE_ID).await;
+    app.set_plugin_enabled(PHONE_ID, "kdeconnect.ping", false)
+        .await;
+
+    // Incoming pings are dropped.
+    send_packet(&mut reader, &phone_ping("Hello")).await;
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match events.recv().await {
+                Some(Event::PingReceived { .. }) => return,
+                Some(_) => {}
+                None => return,
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_err(),
+        "disabled plugin must drop incoming pings"
+    );
+
+    // Outgoing pings are not sent.
+    assert_eq!(
+        app.send_ping(PHONE_ID, "Hello").await,
+        Err(PingError::PluginDisabled)
+    );
+    let packet = tokio::time::timeout(Duration::from_secs(1), read_packet(&mut reader)).await;
+    assert!(packet.is_err(), "disabled plugin must not send pings");
 }

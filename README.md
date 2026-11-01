@@ -6,8 +6,8 @@ control channel and exposes devices, pairing and events over D-Bus
 (`dev.zotta.AriesConnect`) so any frontend can consume them.
 
 Current status: discovery, pairing and unpairing with persistent certificate
-pinning, the D-Bus control interface, notification mirroring and per-device
-plugin configuration are implemented. Battery, clipboard, ping and other
+pinning, the D-Bus control interface, notification mirroring, ping and
+per-device plugin configuration are implemented. Battery, clipboard and other
 plugins are not implemented yet.
 Distribution packaging is not included; `contrib/` only contains an example
 systemd user unit.
@@ -45,7 +45,7 @@ cargo test
 ```
 
 The suite covers the v8 handshake, pairing acceptance, unpairing, the trust
-store and notification mirroring.
+store, notification mirroring and the ping plugin.
 
 ## Documentation
 

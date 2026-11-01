@@ -362,6 +362,9 @@ async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket
         "kdeconnect.notification" => {
             crate::plugins::notifications::handle_packet(app, peer_id.as_deref(), &packet).await;
         }
+        "kdeconnect.ping" => {
+            crate::plugins::ping::handle_packet(app, peer_id.as_deref(), &packet).await;
+        }
         other => {
             tracing::debug!(unknown = other, "ignoring unsupported packet type");
         }

@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::identity::{pair_packet, IdentityBody, LocalIdentity, NetworkPacket};
 use crate::plugins::notifications::{self, NotificationStore};
+use crate::plugins::ping;
 use crate::trusted::{TrustedDevice, TrustedStore};
 
 /// Events pushed toward D-Bus.
@@ -36,6 +37,8 @@ pub enum Event {
     },
     /// A notification was dismissed, locally or on the phone.
     NotificationDismissed { device_id: String, id: String },
+    /// A paired device pinged us, optionally with a message.
+    PingReceived { device_id: String, message: String },
     /// A per-device plugin was enabled or disabled.
     PluginStateChanged {
         device_id: String,
@@ -56,6 +59,12 @@ pub enum UiCommand {
         device_id: String,
         notification_id: String,
     },
+    Ping {
+        device_id: String,
+        message: String,
+        /// Result of the delivery attempt, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), PingError>>,
+    },
     SetPluginEnabled {
         device_id: String,
         plugin: String,
@@ -69,6 +78,30 @@ pub enum PairDecision {
     Accept,
     Reject,
 }
+
+/// Why a ping could not be delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PingError {
+    /// The device is unknown or not paired.
+    NotPaired,
+    /// The `kdeconnect.ping` plugin is disabled for the device.
+    PluginDisabled,
+    /// The device has no active control channel.
+    NotConnected,
+}
+
+impl std::fmt::Display for PingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::NotPaired => "device is not paired",
+            Self::PluginDisabled => "kdeconnect.ping is disabled for this device",
+            Self::NotConnected => "device has no active control channel",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for PingError {}
 
 /// Registry of known devices.
 pub struct DeviceRegistry {
@@ -316,6 +349,35 @@ impl App {
         true
     }
 
+    /// Sends a ping to a device. Fails when the device is not paired, the
+    /// `kdeconnect.ping` plugin is disabled for it or there is no active
+    /// control channel.
+    pub async fn send_ping(&self, device_id: &str, message: &str) -> Result<(), PingError> {
+        if self.trusted.get(device_id).await.is_none() {
+            tracing::debug!(device = %device_id, "cannot ping an unpaired device");
+            return Err(PingError::NotPaired);
+        }
+        if !self
+            .trusted
+            .plugin_enabled(device_id, ping::PING_PACKET)
+            .await
+        {
+            tracing::debug!(device = %device_id, "ping plugin is disabled for this device");
+            return Err(PingError::PluginDisabled);
+        }
+        if !self
+            .send_packet(device_id, &ping::ping_packet(message))
+            .await
+        {
+            tracing::debug!(
+                device = %device_id,
+                "no active control channel to send the ping"
+            );
+            return Err(PingError::NotConnected);
+        }
+        Ok(())
+    }
+
     /// Persists the per-device plugin state. Disabling a plugin also drops its
     /// active state (mirrored notifications) so clients resync once reenabled.
     pub async fn set_plugin_enabled(&self, device_id: &str, plugin: &str, enabled: bool) {
@@ -481,6 +543,18 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                     );
                 }
             }
+            UiCommand::Ping {
+                device_id,
+                message,
+                reply,
+            } => {
+                tracing::info!(device = %device_id, "ping");
+                let result = app.send_ping(&device_id, &message).await;
+                if let Err(e) = &result {
+                    tracing::warn!(device = %device_id, error = %e, "cannot ping");
+                }
+                let _ = reply.send(result);
+            }
             UiCommand::SetPluginEnabled {
                 device_id,
                 plugin,
@@ -495,5 +569,37 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                 app.set_plugin_enabled(&device_id, &plugin, enabled).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::*;
+    use crate::trusted::TrustedStore;
+
+    #[tokio::test]
+    async fn ping_command_reports_delivery_errors() {
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        tokio::spawn(command_loop(app.clone(), cmd_rx));
+
+        let (reply, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::Ping {
+                device_id: "b".repeat(32),
+                message: "hi".to_owned(),
+                reply,
+            })
+            .expect("command queued");
+
+        assert_eq!(
+            response.await.expect("reply"),
+            Err(PingError::NotPaired),
+            "an unknown device must report the failure to the D-Bus caller"
+        );
     }
 }
