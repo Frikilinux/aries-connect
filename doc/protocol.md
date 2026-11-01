@@ -71,6 +71,8 @@ ignore the request for non-clearable notifications.
   D-Bus signal. The decision is sent back as `pair: true/false`; unanswered
   requests expire after 30 s and are rejected.
 - `pair: false` from a peer unpairs the device.
+- Unpairing from the desktop sends `pair: false` to the peer before forgetting
+  the device, so both sides drop the pairing.
 - On acceptance the peer id, name and certificate SHA-256 fingerprint are stored
   in the device's `devices/<id>/device.json`.
 - Reconnecting paired devices must present the same certificate; a mismatch is

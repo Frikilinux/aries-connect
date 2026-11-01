@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-device plugin config: `PluginEnabled`, `SetPluginEnabled` and the
   `PluginStateChanged` signal; changes are persisted per device and disabling
   notifications drops their mirror.
+- New D-Bus method `Unpair` and signal `PairingRemoved`: the daemon notifies the
+  peer with `kdeconnect.pair: false`, deletes the device's state directory,
+  clears its notifications and announces the removal. Peer-initiated unpair
+  removes the same local state without echoing the packet back.
 - Per-device state directories (`devices/<id>/device.json`) with atomic writes,
   replacing the monolithic trust store (migrated and removed on first start).
 

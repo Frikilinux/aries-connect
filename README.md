@@ -5,10 +5,10 @@ dependencies. It discovers paired devices on the LAN, runs the protocol v8
 control channel and exposes devices, pairing and events over D-Bus
 (`dev.zotta.AriesConnect`) so any frontend can consume them.
 
-Current status: discovery, pairing with persistent certificate pinning, the
-D-Bus control interface, notification mirroring and per-device plugin
-configuration are implemented. Battery, clipboard, ping and other plugins are
-not implemented yet.
+Current status: discovery, pairing and unpairing with persistent certificate
+pinning, the D-Bus control interface, notification mirroring and per-device
+plugin configuration are implemented. Battery, clipboard, ping and other
+plugins are not implemented yet.
 Distribution packaging is not included; `contrib/` only contains an example
 systemd user unit.
 
@@ -44,8 +44,8 @@ on first run and reused afterwards.
 cargo test
 ```
 
-The suite covers the v8 handshake, pairing acceptance, the trust store and
-notification mirroring.
+The suite covers the v8 handshake, pairing acceptance, unpairing, the trust
+store and notification mirroring.
 
 ## Documentation
 

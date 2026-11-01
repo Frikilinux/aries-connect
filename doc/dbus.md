@@ -14,6 +14,7 @@ directory.
 | ------------------------- | --------- | ------------------------------------------------- |
 | `AcceptPairing(deviceId)` | `s`       | Accepts the pending pairing request               |
 | `RejectPairing(deviceId)` | `s`       | Rejects the pending pairing request               |
+| `Unpair(deviceId)`        | `s`       | Removes the device and its persisted state, notifying the phone |
 | `Devices()`               | `-`       | Lists known devices as `(id, name, paired, connected)` — `a(ssbb)` |
 | `ActiveNotifications()`   | `-`       | Lists active notifications as `(deviceId, id, appName, title, text)` — `a(sssss)` |
 | `DismissNotification(deviceId, notificationId)` | `ss` | Dismisses a notification locally and on the phone |
@@ -33,6 +34,7 @@ unused. Notification signals carry their own payloads.
 | `PairingRequested`      | `(id, name)`                         | A pairing decision is required              |
 | `PairingAccepted`       | `(id, "")`                           | Pairing completed                           |
 | `PairingRejected`       | `(id, reason)`                       | Pairing rejected, cancelled or timed out    |
+| `PairingRemoved`        | `(id, "")`                           | The device was unpaired                      |
 | `NotificationReceived`  | `(deviceId, id, appName, title, text)` | The phone posted a notification           |
 | `NotificationDismissed` | `(deviceId, id)`                     | A notification was dismissed                |
 | `PluginStateChanged`    | `(deviceId, plugin, enabled)`        | A per-device plugin was toggled             |
@@ -49,6 +51,20 @@ when they receive `PluginStateChanged`.
 3. The client calls `AcceptPairing(id)` or `RejectPairing(id)` within 30 s.
 4. The daemon replies to the phone and emits `PairingAccepted` or
    `PairingRejected`.
+
+## Unpairing flow
+
+1. The client calls `Unpair(id)`.
+2. The daemon sends `kdeconnect.pair: false` through the device's active control
+   channel, so the phone drops its side too. This only reaches the phone while
+   it is connected.
+3. The daemon deletes `devices/<id>/`, clears the device's notifications and
+   emits `PairingRemoved(id)`.
+4. The phone closes the control channel; the daemon then emits
+   `Disconnected(id)`.
+
+An unpair requested by the phone (`kdeconnect.pair: false`) follows the same
+local cleanup and emits `PairingRemoved`, but no packet is echoed back.
 
 ## Examples
 
@@ -71,6 +87,10 @@ busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
 # dismiss a notification on the phone as well
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
   dev.zotta.AriesConnect DismissNotification ss <deviceId> <notificationId>
+
+# unpair a device (also removes its persisted state)
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect Unpair s <deviceId>
 
 # check and toggle the notifications plugin of a device
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \

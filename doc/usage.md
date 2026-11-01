@@ -69,8 +69,21 @@ busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
   dev.zotta.AriesConnect RejectPairing s <deviceId>
 ```
 
-Unpairing from the phone removes the device from the store (the whole
-`devices/<id>/` directory).
+To unpair from the computer:
+
+```sh
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect Unpair s <deviceId>
+```
+
+The daemon sends `kdeconnect.pair: false` to the phone so it drops its side
+too, then deletes the whole `devices/<id>/` directory and emits
+`PairingRemoved`. The phone must be connected at that moment to receive the
+notification; otherwise only the local state is cleared and the phone keeps its
+side until it pairs again.
+
+Unpairing from the phone (`kdeconnect.pair: false`) removes the device from the
+store (the whole `devices/<id>/` directory) and emits `PairingRemoved`.
 
 ## Troubleshooting
 

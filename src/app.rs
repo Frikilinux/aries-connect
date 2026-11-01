@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
-use crate::identity::{IdentityBody, LocalIdentity, NetworkPacket};
+use crate::identity::{pair_packet, IdentityBody, LocalIdentity, NetworkPacket};
 use crate::plugins::notifications::{self, NotificationStore};
 use crate::trusted::{TrustedDevice, TrustedStore};
 
@@ -42,6 +42,8 @@ pub enum Event {
         plugin: String,
         enabled: bool,
     },
+    /// A paired device was removed (unpaired).
+    PairingRemoved { id: String },
 }
 
 /// Commands arriving from the D-Bus interface toward the core.
@@ -49,6 +51,7 @@ pub enum Event {
 pub enum UiCommand {
     AcceptPairing(String),
     RejectPairing(String),
+    Unpair(String),
     DismissNotification {
         device_id: String,
         notification_id: String,
@@ -254,10 +257,24 @@ impl App {
     }
 
     /// Forgets a pairing (peer unpair or explicit removal).
-    pub async fn unpair(&self, id: &str) {
+    ///
+    /// When `notify_peer` is set, the peer receives `kdeconnect.pair: false`
+    /// so it drops its side of the pairing too (local-initiated unpair). Peer
+    /// initiated unpair passes `false` to avoid echoing the packet back.
+    /// Returns true when the device was paired and removed.
+    pub async fn unpair(&self, id: &str, notify_peer: bool) -> bool {
+        let was_paired = self.trusted.get(id).await.is_some();
+        if notify_peer && !self.send_packet(id, &pair_packet(false)).await {
+            // The phone may be offline; local state is cleared regardless.
+            tracing::debug!(device = %id, "no active control channel to notify unpair");
+        }
         self.registry.set_paired(id, false).await;
         self.notifications.clear_device(id).await;
         self.trusted.remove(id).await;
+        let _ = self
+            .events
+            .send(Event::PairingRemoved { id: id.to_owned() });
+        was_paired
     }
 
     /// Dismisses a notification locally and asks the phone to do the same.
@@ -439,6 +456,12 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                 tracing::info!(device = %id, "reject_pairing");
                 if !app.decide_pairing(&id, PairDecision::Reject).await {
                     tracing::warn!(device = %id, "no pending pair request");
+                }
+            }
+            UiCommand::Unpair(id) => {
+                tracing::info!(device = %id, "unpair");
+                if !app.unpair(&id, true).await {
+                    tracing::warn!(device = %id, "device was not paired");
                 }
             }
             UiCommand::DismissNotification {

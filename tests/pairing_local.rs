@@ -295,3 +295,60 @@ async fn rejects_old_protocol_versions() {
     let res = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await;
     assert!(matches!(res, Ok(Ok(0))), "expected EOF, got {res:?}");
 }
+
+#[tokio::test]
+async fn unpair_notifies_peer_and_removes_device() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    // The `Connected` event precedes link publication; give the connection
+    // task a moment so `unpair` can deliver the notification.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    app.mark_paired(PHONE_ID).await;
+
+    assert!(app.unpair(PHONE_ID, true).await, "device was paired");
+
+    // The phone receives the unpair notification.
+    let packet = tokio::time::timeout(Duration::from_secs(5), read_packet(&mut reader))
+        .await
+        .expect("unpair notification reaches the phone");
+    assert_eq!(packet.packet_type, "kdeconnect.pair");
+    assert_eq!(
+        packet.body.get("pair").and_then(|v| v.as_bool()),
+        Some(false),
+        "daemon asks the phone to unpair"
+    );
+
+    // Local state is gone and the removal is announced.
+    assert!(app.trusted.get(PHONE_ID).await.is_none());
+    let device = app.registry.get(PHONE_ID).await.expect("device stays seen");
+    assert!(!device.paired, "device is no longer paired");
+
+    let event = wait_event(&mut events, |e| matches!(e, Event::PairingRemoved { .. })).await;
+    match event {
+        Event::PairingRemoved { id } => assert_eq!(id, PHONE_ID),
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn peer_unpair_does_not_echo_pair_packet() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    app.mark_paired(PHONE_ID).await;
+
+    // The phone unpairs.
+    send_packet(&mut reader, &pair_packet(false)).await;
+
+    // The daemon forgets the device and announces it.
+    let event = wait_event(&mut events, |e| matches!(e, Event::PairingRemoved { .. })).await;
+    assert!(matches!(event, Event::PairingRemoved { .. }));
+    assert!(app.trusted.get(PHONE_ID).await.is_none());
+
+    // ...without echoing another pair packet back to the phone.
+    let echo = tokio::time::timeout(Duration::from_secs(1), read_packet(&mut reader)).await;
+    assert!(
+        echo.is_err(),
+        "peer-initiated unpair must not send a pair packet back"
+    );
+}

@@ -34,6 +34,13 @@ impl AriesConnectIface {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
+    /// Unpair (remove) a device, notifying the peer so it drops its side too.
+    async fn unpair(&self, device_id: String) -> zbus::fdo::Result<()> {
+        self.cmd_tx
+            .send(UiCommand::Unpair(device_id))
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
     /// List known devices as (id, name, paired, connected) tuples.
     async fn devices(&self) -> zbus::fdo::Result<Vec<(String, String, bool, bool)>> {
         Ok(self
@@ -204,6 +211,12 @@ async fn signal_loop(conn: zbus::Connection, mut events: mpsc::UnboundedReceiver
                         "PluginStateChanged",
                         &(device_id, plugin, enabled),
                     )
+                    .await,
+            ),
+            Event::PairingRemoved { id } => (
+                "PairingRemoved",
+                emitter
+                    .emit(DBUS_NAME, "PairingRemoved", &(id, String::new()))
                     .await,
             ),
         };
