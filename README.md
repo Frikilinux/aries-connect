@@ -5,12 +5,17 @@ dependencies. It discovers paired devices on the LAN, runs the protocol v8
 control channel and exposes devices, pairing and events over D-Bus
 (`dev.zotta.AriesConnect`) so any frontend can consume them.
 
-Current status: discovery, pairing and unpairing with persistent certificate
-pinning, the D-Bus control interface, notification mirroring, ping and
-per-device plugin configuration are implemented. Battery, clipboard and other
-plugins are not implemented yet.
-Distribution packaging is not included; `contrib/` only contains an example
-systemd user unit.
+## Current status
+
+| Capability | Status |
+| --- | --- |
+| Discovery (UDP 1716) | Implemented |
+| Control channel (TCP 1716, TLS, protocol v8) | Implemented |
+| Pairing and unpairing with certificate pinning | Implemented |
+| D-Bus API (`dev.zotta.AriesConnect`) | Implemented |
+| Notification mirroring | Implemented |
+| Ping | Implemented |
+| Per-device plugin configuration | Implemented |
 
 ## Requirements
 
@@ -37,6 +42,10 @@ cargo build --release
 
 The identity certificate (RSA-2048) and the 32-character device id are created
 on first run and reused afterwards.
+
+## Systemd user unit
+
+The folder `contrib/` contains an example systemd user unit.
 
 ## Tests
 
