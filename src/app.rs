@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
-use crate::identity::{IdentityBody, LocalIdentity, NetworkPacket};
+use crate::identity::{pair_packet, IdentityBody, LocalIdentity, NetworkPacket};
+use crate::plugins::notifications::{self, NotificationStore};
 use crate::trusted::{TrustedDevice, TrustedStore};
 
 /// Events pushed toward D-Bus.
@@ -25,6 +26,24 @@ pub enum Event {
     PairingAccepted { id: String },
     /// Pairing rejected (by us, by the peer, or by timeout).
     PairingRejected { id: String, reason: String },
+    /// The phone posted a notification.
+    NotificationReceived {
+        device_id: String,
+        id: String,
+        app_name: String,
+        title: String,
+        text: String,
+    },
+    /// A notification was dismissed, locally or on the phone.
+    NotificationDismissed { device_id: String, id: String },
+    /// A per-device plugin was enabled or disabled.
+    PluginStateChanged {
+        device_id: String,
+        plugin: String,
+        enabled: bool,
+    },
+    /// A paired device was removed (unpaired).
+    PairingRemoved { id: String },
 }
 
 /// Commands arriving from the D-Bus interface toward the core.
@@ -32,6 +51,16 @@ pub enum Event {
 pub enum UiCommand {
     AcceptPairing(String),
     RejectPairing(String),
+    Unpair(String),
+    DismissNotification {
+        device_id: String,
+        notification_id: String,
+    },
+    SetPluginEnabled {
+        device_id: String,
+        plugin: String,
+        enabled: bool,
+    },
 }
 
 /// Decision on a pairing request.
@@ -168,6 +197,8 @@ pub struct App {
     pub trusted: TrustedStore,
     /// Channel of events toward D-Bus.
     pub events: mpsc::UnboundedSender<Event>,
+    /// Active notifications mirrored from paired devices.
+    pub notifications: NotificationStore,
     /// Pending pairing requests: deviceId -> decision sender.
     pending_pairs: Mutex<HashMap<String, oneshot::Sender<PairDecision>>>,
     /// Latest control channel per device.
@@ -186,6 +217,7 @@ impl App {
             registry: DeviceRegistry::new(),
             trusted,
             events,
+            notifications: NotificationStore::new(),
             pending_pairs: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             link_generation: AtomicU64::new(0),
@@ -218,14 +250,101 @@ impl App {
                 id: id.to_owned(),
                 name,
                 cert_sha256,
+                last_ip: None,
+                plugins: HashMap::new(),
             })
             .await;
     }
 
     /// Forgets a pairing (peer unpair or explicit removal).
-    pub async fn unpair(&self, id: &str) {
+    ///
+    /// When `notify_peer` is set, the peer receives `kdeconnect.pair: false`
+    /// so it drops its side of the pairing too (local-initiated unpair). Peer
+    /// initiated unpair passes `false` to avoid echoing the packet back.
+    /// Returns true when the device was paired and removed.
+    pub async fn unpair(&self, id: &str, notify_peer: bool) -> bool {
+        let was_paired = self.trusted.get(id).await.is_some();
+        if notify_peer && !self.send_packet(id, &pair_packet(false)).await {
+            // The phone may be offline; local state is cleared regardless.
+            tracing::debug!(device = %id, "no active control channel to notify unpair");
+        }
         self.registry.set_paired(id, false).await;
+        self.notifications.clear_device(id).await;
         self.trusted.remove(id).await;
+        let _ = self
+            .events
+            .send(Event::PairingRemoved { id: id.to_owned() });
+        was_paired
+    }
+
+    /// Dismisses a notification locally and asks the phone to do the same.
+    /// Returns false when the notification is unknown or the notifications
+    /// plugin is disabled for that device.
+    pub async fn dismiss_notification(&self, device_id: &str, notification_id: &str) -> bool {
+        if !self
+            .trusted
+            .plugin_enabled(device_id, notifications::NOTIFICATION_PACKET)
+            .await
+        {
+            tracing::debug!(
+                device = %device_id,
+                "notifications plugin is disabled for this device"
+            );
+            return false;
+        }
+        if self
+            .notifications
+            .remove(device_id, notification_id)
+            .await
+            .is_none()
+        {
+            return false;
+        }
+        let _ = self.events.send(Event::NotificationDismissed {
+            device_id: device_id.to_owned(),
+            id: notification_id.to_owned(),
+        });
+        if !self
+            .send_packet(device_id, &notifications::dismiss_packet(notification_id))
+            .await
+        {
+            tracing::debug!(
+                device = %device_id,
+                "no active control channel to forward the dismissal"
+            );
+        }
+        true
+    }
+
+    /// Persists the per-device plugin state. Disabling a plugin also drops its
+    /// active state (mirrored notifications) so clients resync once reenabled.
+    pub async fn set_plugin_enabled(&self, device_id: &str, plugin: &str, enabled: bool) {
+        if plugin == notifications::NOTIFICATION_PACKET && !enabled {
+            self.notifications.clear_device(device_id).await;
+        }
+        if self
+            .trusted
+            .set_plugin_enabled(device_id, plugin, enabled)
+            .await
+        {
+            tracing::info!(device = %device_id, plugin = %plugin, %enabled, "plugin state changed");
+            self.emit(Event::PluginStateChanged {
+                device_id: device_id.to_owned(),
+                plugin: plugin.to_owned(),
+                enabled,
+            });
+        }
+    }
+
+    /// Persists the last address of a paired device so unicast discovery can
+    /// reach it after a daemon restart. Unpaired devices are ignored.
+    pub async fn remember_peer_address(&self, id: &str, ip: &str) {
+        if self.trusted.get(id).await.is_none() {
+            return;
+        }
+        if self.trusted.update_last_ip(id, ip).await {
+            tracing::debug!(device = %id, %ip, "updated last known address");
+        }
     }
 
     /// Registers the sender of a freshly established control channel and
@@ -251,14 +370,17 @@ impl App {
     }
 
     /// Removes a link only if it is still the newest one for that device.
-    pub async fn unregister_link(&self, id: &str, generation: u64) {
+    /// Returns whether it was current.
+    pub async fn unregister_link(&self, id: &str, generation: u64) -> bool {
         let mut links = self.links.lock().await;
         if links
             .get(id)
             .is_some_and(|link| link.generation == generation)
         {
             links.remove(id);
+            return true;
         }
+        false
     }
 
     /// Sends a packet through the device's current control channel.
@@ -335,6 +457,42 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                 if !app.decide_pairing(&id, PairDecision::Reject).await {
                     tracing::warn!(device = %id, "no pending pair request");
                 }
+            }
+            UiCommand::Unpair(id) => {
+                tracing::info!(device = %id, "unpair");
+                if !app.unpair(&id, true).await {
+                    tracing::warn!(device = %id, "device was not paired");
+                }
+            }
+            UiCommand::DismissNotification {
+                device_id,
+                notification_id,
+            } => {
+                tracing::debug!(
+                    device = %device_id,
+                    notification = %notification_id,
+                    "dismiss_notification"
+                );
+                if !app.dismiss_notification(&device_id, &notification_id).await {
+                    tracing::warn!(
+                        device = %device_id,
+                        notification = %notification_id,
+                        "unknown notification"
+                    );
+                }
+            }
+            UiCommand::SetPluginEnabled {
+                device_id,
+                plugin,
+                enabled,
+            } => {
+                tracing::info!(
+                    device = %device_id,
+                    plugin = %plugin,
+                    %enabled,
+                    "set_plugin_enabled"
+                );
+                app.set_plugin_enabled(&device_id, &plugin, enabled).await;
             }
         }
     }

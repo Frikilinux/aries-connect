@@ -3,6 +3,8 @@
 //! Incoming `pair:true` requests are surfaced to the user as a D-Bus signal
 //! and resolved via the D-Bus methods `AcceptPairing`/`RejectPairing`.
 //! Unanswered requests expire after `PAIR_TIMEOUT` and auto-reject.
+//! An incoming `pair:false` means the peer unpairs: local state is removed and
+//! `PairingRemoved` is emitted.
 //!
 //! Replies are sent through the device's *current* control channel: Android
 //! replaces its socket every time it receives a discovery broadcast, so the
@@ -25,13 +27,10 @@ pub async fn handle_pair(app: Arc<App>, device_id: Option<String>, accept_reques
         return;
     };
 
-    // The peer asked to *unpair*; nothing to negotiate.
+    // The peer asked to *unpair*; nothing to negotiate and no packet to send
+    // back. `unpair` emits `PairingRemoved`.
     if !accept_requested {
-        app.unpair(&device_id).await;
-        let _ = app.events.send(Event::PairingRejected {
-            id: device_id,
-            reason: "peer unpaired".to_owned(),
-        });
+        app.unpair(&device_id, false).await;
         return;
     }
 

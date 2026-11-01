@@ -94,14 +94,22 @@ pub struct LocalIdentity {
 }
 
 impl LocalIdentity {
-    /// Capabilities declared in this first iteration (pairing only).
+    /// Capabilities declared by this iteration.
     pub fn new(device_id: String, device_name: String, tcp_port: u16) -> Self {
         Self {
             device_id,
             device_name,
             tcp_port,
-            incoming_capabilities: vec!["kdeconnect.pair".to_owned()],
-            outgoing_capabilities: vec!["kdeconnect.pair".to_owned()],
+            incoming_capabilities: vec![
+                "kdeconnect.pair".to_owned(),
+                "kdeconnect.notification".to_owned(),
+                "kdeconnect.notification.request".to_owned(),
+            ],
+            outgoing_capabilities: vec![
+                "kdeconnect.pair".to_owned(),
+                "kdeconnect.notification".to_owned(),
+                "kdeconnect.notification.request".to_owned(),
+            ],
         }
     }
 

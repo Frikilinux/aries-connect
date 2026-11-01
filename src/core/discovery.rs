@@ -2,15 +2,19 @@
 //!
 //! Datagrams are plain JSON; the legacy random-salt + `kdeconnect.` prefix is
 //! also accepted. Announcements go to the limited broadcast address, every
-//! interface's directed broadcast and loopback, and each received identity is
-//! answered unicast (Android sends from ephemeral ports, so `ip:1716` alone is
-//! unreliable).
+//! interface's directed broadcast, loopback and the last known address of each
+//! peer (unicast), and each received identity is answered unicast (Android
+//! sends from ephemeral ports, so `ip:1716` alone is unreliable).
+//!
+//! Unicast announcements matter while the phone screen is off: Android may
+//! filter broadcast/multicast traffic in power saving, but unicast datagrams
+//! still reach it and trigger discovery.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::{net::UdpSocket, time};
@@ -23,6 +27,80 @@ const ANNOUNCE_INTERVAL: tokio::time::Duration = time::Duration::from_secs(10);
 
 /// Minimum delay between unicast replies to the same device.
 const REPLY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A peer address is remembered for this long.
+const PEER_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Upper bound for the remembered peer table.
+const MAX_PEERS: usize = 64;
+
+/// Last known address of every device heard over UDP.
+#[derive(Default)]
+struct PeerBook {
+    peers: Mutex<HashMap<String, PeerEntry>>,
+}
+
+#[derive(Clone, Copy)]
+struct PeerEntry {
+    addr: SocketAddr,
+    seen: Instant,
+}
+
+impl PeerBook {
+    /// Preloads a persisted address (paired devices at startup).
+    fn seed(&self, device_id: &str, ip: Ipv4Addr, port: u16) {
+        self.peers.lock().expect("peer book poisoned").insert(
+            device_id.to_owned(),
+            PeerEntry {
+                addr: SocketAddr::new(ip.into(), port),
+                seen: Instant::now(),
+            },
+        );
+    }
+
+    fn remember(&self, device_id: &str, from: SocketAddr) {
+        let SocketAddr::V4(addr) = from else {
+            return;
+        };
+        if addr.ip().is_loopback() || addr.ip().is_unspecified() {
+            return;
+        }
+        let mut peers = self.peers.lock().expect("peer book poisoned");
+        let now = Instant::now();
+        if peers.len() >= MAX_PEERS {
+            peers.retain(|_, entry| now.duration_since(entry.seen) < PEER_TTL);
+            if peers.len() >= MAX_PEERS {
+                peers.clear();
+            }
+        }
+        peers.insert(
+            device_id.to_owned(),
+            PeerEntry {
+                addr: from,
+                seen: now,
+            },
+        );
+    }
+
+    /// Addresses to announce to: the conventional port on the peer IP and the
+    /// last source port (Android may use an ephemeral one).
+    fn targets(&self, port: u16) -> Vec<SocketAddr> {
+        let now = Instant::now();
+        let peers = self.peers.lock().expect("peer book poisoned");
+        let mut targets = Vec::new();
+        for entry in peers.values() {
+            if now.duration_since(entry.seen) >= PEER_TTL {
+                continue;
+            }
+            let conventional = SocketAddr::new(entry.addr.ip(), port);
+            targets.push(conventional);
+            if entry.addr != conventional {
+                targets.push(entry.addr);
+            }
+        }
+        targets
+    }
+}
 
 pub struct DiscoveryConfig {
     pub port: u16,
@@ -92,19 +170,46 @@ fn announce_targets(port: u16) -> Vec<SocketAddr> {
 pub async fn spawn(app: Arc<App>, config: DiscoveryConfig) -> io::Result<()> {
     let socket = Arc::new(udp_socket(config.port)?);
     let targets = announce_targets(config.port);
+    let peers = Arc::new(PeerBook::default());
+    for device in app.trusted.all().await {
+        if let Some(ip) = device
+            .last_ip
+            .as_deref()
+            .and_then(|value| value.parse::<Ipv4Addr>().ok())
+        {
+            peers.seed(&device.id, ip, config.port);
+        }
+    }
     tracing::info!(
         targets = ?targets,
         "UDP discovery active"
     );
-    tokio::spawn(announce_loop(app.clone(), socket.clone(), targets.clone()));
-    tokio::spawn(receive_loop(app, socket, config.port, targets));
+    tokio::spawn(announce_loop(
+        app.clone(),
+        socket.clone(),
+        targets.clone(),
+        peers.clone(),
+        config.port,
+    ));
+    tokio::spawn(receive_loop(app, socket, config.port, targets, peers));
     Ok(())
 }
 
-/// Periodically broadcasts our identity so phones can discover us.
-async fn announce_loop(app: Arc<App>, socket: Arc<UdpSocket>, targets: Vec<SocketAddr>) {
+/// Periodically announces our identity so phones can discover (and reconnect
+/// to) us. Includes unicast to peers already heard from.
+async fn announce_loop(
+    app: Arc<App>,
+    socket: Arc<UdpSocket>,
+    broadcast_targets: Vec<SocketAddr>,
+    peers: Arc<PeerBook>,
+    port: u16,
+) {
     loop {
         let dgrams = identity_datagrams(&app);
+        let mut targets = broadcast_targets.clone();
+        targets.extend(peers.targets(port));
+        targets.sort_by_key(|a| a.ip());
+        targets.dedup_by_key(|a| a.ip());
         for target in &targets {
             for dgram in &dgrams {
                 if let Err(e) = socket.send_to(dgram, target).await {
@@ -151,7 +256,13 @@ fn hex_preview(bytes: &[u8], max: usize) -> String {
 }
 
 /// Receives and decodes incoming identity datagrams.
-async fn receive_loop(app: Arc<App>, socket: Arc<UdpSocket>, port: u16, targets: Vec<SocketAddr>) {
+async fn receive_loop(
+    app: Arc<App>,
+    socket: Arc<UdpSocket>,
+    port: u16,
+    targets: Vec<SocketAddr>,
+    peers: Arc<PeerBook>,
+) {
     let mut buf = vec![0u8; 65536];
     let mut last_reply: HashMap<SocketAddr, Instant> = HashMap::new();
 
@@ -209,6 +320,11 @@ async fn receive_loop(app: Arc<App>, socket: Arc<UdpSocket>, port: u16, targets:
                     name = %body.device_name,
                     "discovered device"
                 );
+                peers.remember(&body.device_id, from);
+                if let std::net::IpAddr::V4(ip) = from.ip() {
+                    app.remember_peer_address(&body.device_id, &ip.to_string())
+                        .await;
+                }
                 let created = app.seen(&body, true).await;
 
                 // Answer right away (rate-limited per source) so the peer
@@ -242,5 +358,41 @@ async fn receive_loop(app: Arc<App>, socket: Arc<UdpSocket>, port: u16, targets:
                 tracing::debug!(?packet.packet_type, "datagram is not an identity packet");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(value: &str) -> SocketAddr {
+        value.parse().expect("socket address")
+    }
+
+    #[test]
+    fn remembers_conventional_and_source_ports() {
+        let book = PeerBook::default();
+        book.remember("phone", addr("192.168.1.20:40000"));
+        let targets = book.targets(1716);
+        assert!(targets.contains(&addr("192.168.1.20:1716")));
+        assert!(targets.contains(&addr("192.168.1.20:40000")));
+    }
+
+    #[test]
+    fn seeded_peer_is_announced() {
+        let book = PeerBook::default();
+        book.seed("phone", Ipv4Addr::new(192, 168, 1, 20), 1716);
+        assert_eq!(book.targets(1716), vec![addr("192.168.1.20:1716")]);
+    }
+
+    #[test]
+    fn ignores_loopback_and_replaces_old_address() {
+        let book = PeerBook::default();
+        book.remember("phone", addr("127.0.0.1:1716"));
+        assert!(book.targets(1716).is_empty());
+
+        book.remember("phone", addr("192.168.1.20:1716"));
+        book.remember("phone", addr("192.168.1.21:1716"));
+        assert_eq!(book.targets(1716), vec![addr("192.168.1.21:1716")]);
     }
 }
