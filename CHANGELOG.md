@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Android devices reconnect while the screen is off and broadcasts are filtered.
 - The last known IPv4 address of paired devices is persisted in
   `trusted_devices.json` and used to seed unicast discovery after a restart.
+- Example systemd user unit in `contrib/aries-connect.service`.
 
 ### Changed
 

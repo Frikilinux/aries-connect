@@ -11,6 +11,9 @@ The daemon must run inside a user session with a D-Bus session bus, because it
 registers `dev.zotta.AriesConnect` there. It has no graphical dependencies and
 keeps running until interrupted.
 
+An example systemd user unit is provided in `contrib/aries-connect.service`;
+adjust `ExecStart` to the binary path if you use it.
+
 ## Configuration
 
 | Variable      | Default                              | Description                     |
