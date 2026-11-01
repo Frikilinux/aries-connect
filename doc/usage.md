@@ -85,6 +85,29 @@ side until it pairs again.
 Unpairing from the phone (`kdeconnect.pair: false`) removes the device from the
 store (the whole `devices/<id>/` directory) and emits `PairingRemoved`.
 
+## Ping
+
+Once a device is paired and connected, the desktop can ping it:
+
+```sh
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect PingDevice ss <deviceId> "Hello from the desktop"
+```
+
+The message may be empty. The phone shows a notification; it does not reply.
+`PingDevice` fails with a D-Bus error when the device is not paired, the
+`kdeconnect.ping` plugin is disabled for it or it is not connected.
+
+Pings sent by the phone appear as the `PingReceived(deviceId, message)` signal;
+they are ignored when the plugin is disabled for that device. The plugin can be
+toggled with `SetPluginEnabled` like any other. Toggling is local only (the
+phone is not notified) and is announced to clients with `PluginStateChanged`;
+query `PluginEnabled` for the current state.
+
+The phone learns the available plugins from the identity it receives when it
+connects, so restart the phone app (or wait for it to reconnect) after upgrading
+the daemon for the ping action to appear.
+
 ## Troubleshooting
 
 - **The phone does not list the computer**: confirm both are on the same
@@ -97,6 +120,12 @@ store (the whole `devices/<id>/` directory) and emits `PairingRemoved`.
   writable; the daemon then falls back to an ephemeral id.
 - **The certificate warning appears again**: the state directory was deleted or
   recreated.
+- **The phone does not show the ping action**: restart the phone app so it
+  fetches the daemon identity again, and check that the `kdeconnect.ping`
+  plugin is enabled for the device (`PluginEnabled`).
+- **`PingDevice` fails**: the error says whether the device is unpaired, the
+  plugin is disabled or the phone is not connected. `Devices()` reports the
+  connection state.
 - **Notifications stop when the phone screen is off**: Android is suspending the
   KDE Connect app or filtering its network traffic. Set the app's battery usage
   to unrestricted, enable its persistent notification and keep Wi-Fi active

@@ -46,9 +46,10 @@ The phone is always the TCP initiator; AriesConnect only accepts connections.
 4. From then on, packets are newline-delimited JSON. A packet is
    `{"id": <ms>, "type": "...", "body": {...}}`.
 
-Implemented packet types: `kdeconnect.identity`, `kdeconnect.pair` and
-`kdeconnect.notification`; `kdeconnect.notification.request` is sent to dismiss
-notifications on the phone. Unsupported types are ignored (debug log).
+Implemented packet types: `kdeconnect.identity`, `kdeconnect.pair`,
+`kdeconnect.notification` and `kdeconnect.ping`;
+`kdeconnect.notification.request` is sent to dismiss notifications on the
+phone. Unsupported types are ignored (debug log).
 
 ## Notifications
 
@@ -64,6 +65,26 @@ device and drops the oldest first.
 Dismissing from the desktop sends `kdeconnect.notification.request` with
 `{"cancel": "<id>"}`. The local mirror is removed immediately; the phone may
 ignore the request for non-clearable notifications.
+
+## Ping
+
+Both directions use the same `kdeconnect.ping` packet with an optional
+`{"message": "<text>"}` body. The sender does not expect a reply: the receiver
+only shows a notification, and the daemon surfaces incoming pings over D-Bus.
+
+Pings are accepted only from **paired** devices with their `kdeconnect.ping`
+plugin enabled; the same restriction applies when the desktop pings the phone.
+The message may be missing or empty, in which case the phone shows its generic
+"Ping!" notification.
+
+AriesConnect advertises `kdeconnect.ping` in both `incomingCapabilities` and
+`outgoingCapabilities` of its identity, which is what makes the phone offer the
+ping action. The phone evaluates capabilities when it receives an identity, so
+after changing the advertised set the daemon must reconnect (or announce again)
+before the phone reflects it.
+
+Incoming pings are dropped with a debug log when they come from an unpaired
+device or when the plugin is disabled for it.
 
 ## Trust model
 
@@ -89,7 +110,11 @@ defaults keep working as plugins are added. Device files are written atomically
 (temporary file plus rename) and only when a value actually changed.
 
 - `SetPluginEnabled(deviceId, plugin, bool)` toggles one plugin; the change is
-  persisted and announced with the `PluginStateChanged` signal.
+  persisted and announced with the `PluginStateChanged` signal. Only real
+  changes emit it: unknown devices and repeated values are silent no-ops.
+- Plugin state is **local**: toggling a plugin neither rewrites the identity nor
+  notifies the phone, so the phone keeps offering that plugin until it
+  reconnects. Outgoing packets of a disabled plugin are not sent either.
 - Disabling notifications drops that device's mirrored notifications;
   reenabling starts empty.
 - Unpairing deletes the device directory, including its plugin state. Legacy

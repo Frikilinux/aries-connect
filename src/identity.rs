@@ -104,11 +104,13 @@ impl LocalIdentity {
                 "kdeconnect.pair".to_owned(),
                 "kdeconnect.notification".to_owned(),
                 "kdeconnect.notification.request".to_owned(),
+                "kdeconnect.ping".to_owned(),
             ],
             outgoing_capabilities: vec![
                 "kdeconnect.pair".to_owned(),
                 "kdeconnect.notification".to_owned(),
                 "kdeconnect.notification.request".to_owned(),
+                "kdeconnect.ping".to_owned(),
             ],
         }
     }
@@ -163,4 +165,25 @@ pub fn parse_pair(packet: &NetworkPacket) -> Option<PairBody> {
         return None;
     }
     serde_json::from_value(packet.body.clone()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::ping;
+
+    #[test]
+    fn identity_advertises_ping_in_both_directions() {
+        let identity = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        for capabilities in [
+            &identity.incoming_capabilities,
+            &identity.outgoing_capabilities,
+        ] {
+            assert!(
+                capabilities.iter().any(|c| c == ping::PING_PACKET),
+                "identity must advertise {}",
+                ping::PING_PACKET
+            );
+        }
+    }
 }

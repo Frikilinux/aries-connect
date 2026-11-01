@@ -2,3 +2,4 @@
 //! own packet types and feeds the shared state.
 
 pub mod notifications;
+pub mod ping;
