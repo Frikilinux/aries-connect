@@ -45,7 +45,9 @@ pub enum Event {
         plugin: String,
         enabled: bool,
     },
-    /// A paired device was removed (unpaired).
+    /// A device was unpaired (locally or from the phone). It stays known as
+    /// an unpaired device, so the device object is kept and only `Paired`
+    /// changes.
     PairingRemoved { id: String },
 }
 
@@ -69,6 +71,8 @@ pub enum UiCommand {
         device_id: String,
         plugin: String,
         enabled: bool,
+        /// Result of the toggle, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), PluginError>>,
     },
 }
 
@@ -102,6 +106,27 @@ impl std::fmt::Display for PingError {
 }
 
 impl std::error::Error for PingError {}
+
+/// Why a plugin toggle was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginError {
+    /// The device is unknown or not paired.
+    UnknownDevice,
+    /// The daemon does not implement that plugin.
+    UnsupportedPlugin,
+}
+
+impl std::fmt::Display for PluginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::UnknownDevice => "device is not paired",
+            Self::UnsupportedPlugin => "plugin is not implemented by the daemon",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for PluginError {}
 
 /// Registry of known devices.
 pub struct DeviceRegistry {
@@ -380,7 +405,22 @@ impl App {
 
     /// Persists the per-device plugin state. Disabling a plugin also drops its
     /// active state (mirrored notifications) so clients resync once reenabled.
-    pub async fn set_plugin_enabled(&self, device_id: &str, plugin: &str, enabled: bool) {
+    /// Fails for unpaired devices and for plugins the daemon does not
+    /// implement; setting the current value is a no-op.
+    pub async fn set_plugin_enabled(
+        &self,
+        device_id: &str,
+        plugin: &str,
+        enabled: bool,
+    ) -> Result<(), PluginError> {
+        if self.trusted.get(device_id).await.is_none() {
+            tracing::debug!(device = %device_id, "plugin toggle for an unpaired device");
+            return Err(PluginError::UnknownDevice);
+        }
+        if !crate::plugins::supported_plugins().contains(&plugin) {
+            tracing::debug!(device = %device_id, plugin = %plugin, "unknown plugin");
+            return Err(PluginError::UnsupportedPlugin);
+        }
         if plugin == notifications::NOTIFICATION_PACKET && !enabled {
             self.notifications.clear_device(device_id).await;
         }
@@ -396,6 +436,7 @@ impl App {
                 enabled,
             });
         }
+        Ok(())
     }
 
     /// Persists the last address of a paired device so unicast discovery can
@@ -559,6 +600,7 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                 device_id,
                 plugin,
                 enabled,
+                reply,
             } => {
                 tracing::info!(
                     device = %device_id,
@@ -566,7 +608,11 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                     %enabled,
                     "set_plugin_enabled"
                 );
-                app.set_plugin_enabled(&device_id, &plugin, enabled).await;
+                let result = app.set_plugin_enabled(&device_id, &plugin, enabled).await;
+                if let Err(e) = &result {
+                    tracing::warn!(device = %device_id, plugin = %plugin, error = %e, "cannot toggle plugin");
+                }
+                let _ = reply.send(result);
             }
         }
     }
@@ -601,5 +647,80 @@ mod tests {
             Err(PingError::NotPaired),
             "an unknown device must report the failure to the D-Bus caller"
         );
+    }
+
+    #[tokio::test]
+    async fn plugin_toggle_rejects_unpaired_devices() {
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let device_id = "b".repeat(32);
+
+        assert_eq!(
+            app.set_plugin_enabled(&device_id, "kdeconnect.ping", false)
+                .await,
+            Err(PluginError::UnknownDevice)
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_toggle_rejects_unsupported_plugins() {
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let device_id = "b".repeat(32);
+        app.trusted
+            .insert(TrustedDevice {
+                id: device_id.clone(),
+                name: "Phone".to_owned(),
+                cert_sha256: None,
+                last_ip: None,
+                plugins: HashMap::new(),
+            })
+            .await;
+
+        assert_eq!(
+            app.set_plugin_enabled(&device_id, "kdeconnect.nope", false)
+                .await,
+            Err(PluginError::UnsupportedPlugin)
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_toggle_persists_and_announces_supported_plugins() {
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, mut events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let device_id = "b".repeat(32);
+        app.trusted
+            .insert(TrustedDevice {
+                id: device_id.clone(),
+                name: "Phone".to_owned(),
+                cert_sha256: None,
+                last_ip: None,
+                plugins: HashMap::new(),
+            })
+            .await;
+
+        app.set_plugin_enabled(&device_id, "kdeconnect.ping", false)
+            .await
+            .expect("supported plugin");
+        assert!(
+            !app.trusted
+                .plugin_enabled(&device_id, "kdeconnect.ping")
+                .await
+        );
+        match events_rx.try_recv().expect("plugin event") {
+            Event::PluginStateChanged {
+                device_id: id,
+                plugin,
+                enabled,
+            } => {
+                assert_eq!(id, device_id);
+                assert_eq!(plugin, "kdeconnect.ping");
+                assert!(!enabled);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

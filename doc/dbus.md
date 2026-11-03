@@ -1,148 +1,230 @@
 # D-Bus interface
 
 Service: `dev.zotta.AriesConnect`
-Object: `/dev/zotta/AriesConnect`
-Interface: `dev.zotta.AriesConnect`
 
-The object path is a D-Bus address, not a filesystem path: it is the
-reverse-DNS form of the service name and does not refer to the system `/dev`
+The daemon exposes two kinds of objects:
+
+| Object | Interface | Scope |
+| --- | --- | --- |
+| `/dev/zotta/AriesConnect` | `dev.zotta.AriesConnect` | Service-wide data and the pairing prompt |
+| `/dev/zotta/AriesConnect/Device/<id>` | `dev.zotta.AriesConnect.Device` | One known device: state, actions and its signals |
+
+`org.freedesktop.DBus.ObjectManager` is served on the service object, so
+clients can enumerate device objects and their properties with
+`GetManagedObjects()` instead of walking paths.
+
+The object paths are D-Bus addresses, not filesystem paths: they are the
+reverse-DNS form of the service name and do not refer to the system `/dev`
 directory.
 
-## Methods
+## Service object
 
-| Method                    | Signature | Description                                       |
-| ------------------------- | --------- | ------------------------------------------------- |
-| `AcceptPairing(deviceId)` | `s`       | Accepts the pending pairing request               |
-| `RejectPairing(deviceId)` | `s`       | Rejects the pending pairing request               |
-| `Unpair(deviceId)`        | `s`       | Removes the device and its persisted state, notifying the phone |
-| `Devices()`               | `-`       | Lists known devices as `(id, name, paired, connected)` — `a(ssbb)` |
-| `ActiveNotifications()`   | `-`       | Lists active notifications as `(deviceId, id, appName, title, text)` — `a(sssss)` |
-| `DismissNotification(deviceId, notificationId)` | `ss` | Dismisses a notification locally and on the phone |
-| `PingDevice(deviceId, message)` | `ss` | Pings the device with an optional `message` (may be empty); fails if it cannot be delivered |
-| `PluginEnabled(deviceId, plugin)` | `ss` | Whether `plugin` (e.g. `kdeconnect.notification`, `kdeconnect.ping`) is enabled for the device; unknown devices report `false` |
-| `SetPluginEnabled(deviceId, plugin, bool)` | `ssb` | Enables or disables `plugin` for the device; persisted and announced with `PluginStateChanged` |
+`/dev/zotta/AriesConnect`, interface `dev.zotta.AriesConnect`.
 
-## Signals
+| Method | Signature | Description |
+| --- | --- | --- |
+| `AcceptPairing(deviceId)` | `s` | Accepts the pending pairing request |
+| `RejectPairing(deviceId)` | `s` | Rejects the pending pairing request |
+| `Devices()` | `-` | Snapshot of known devices as `(id, name, paired, connected)` — `a(ssbb)` |
+| `ActiveNotifications()` | `-` | Notifications of every device as `(deviceId, id, appName, title, text)` — `a(sssss)` |
 
-Core signals carry two strings; the second is context and is empty when unused.
-`NotificationReceived`, `NotificationDismissed` and `PingReceived` carry their
-own payloads.
+| Signal | Payload | Meaning |
+| --- | --- | --- |
+| `PairingRequested` | `(id, name)` | A pairing decision is required |
+| `PairingRejected` | `(id, reason)` | Pairing rejected, cancelled or timed out |
 
-| Signal                  | Payload                              | Meaning                                     |
-| ----------------------- | ------------------------------------ | ------------------------------------------- |
-| `DeviceSeen`            | `(id, name)`                         | A device appeared over UDP                  |
-| `Connected`             | `(id, "")`                           | Control channel established and identified  |
-| `Disconnected`          | `(id, "")`                           | Control channel closed                      |
-| `PairingRequested`      | `(id, name)`                         | A pairing decision is required              |
-| `PairingAccepted`       | `(id, "")`                           | Pairing completed                           |
-| `PairingRejected`       | `(id, reason)`                       | Pairing rejected, cancelled or timed out    |
-| `PairingRemoved`        | `(id, "")`                           | The device was unpaired                      |
-| `NotificationReceived`  | `(deviceId, id, appName, title, text)` | The phone posted a notification           |
-| `NotificationDismissed` | `(deviceId, id)`                     | A notification was dismissed                |
-| `PingReceived`          | `(deviceId, message)`                | A paired device pinged us                   |
-| `PluginStateChanged`    | `(deviceId, plugin, enabled)`        | A per-device plugin was toggled             |
+`Devices()` is a convenience snapshot; `GetManagedObjects()` is the canonical
+way to read device state. Both report the same data.
 
-Notifications are kept in memory across reconnects (Android replaces its socket
-frequently); they are cleared when the device is unpaired or when its
-notifications plugin is disabled. Clients should refresh `ActiveNotifications()`
-when they receive `PluginStateChanged`.
+## Device objects
 
-`PluginStateChanged` is only emitted when a value actually changes:
-`SetPluginEnabled` is a silent no-op for unknown devices or when the requested
-state already matches. There is no signal for the initial state, so clients
-must call `PluginEnabled` per device (unknown devices report `false`).
-Unpairing deletes `devices/<id>/` and is announced with `PairingRemoved`, not
-with `PluginStateChanged`.
+### Path
+
+```
+/dev/zotta/AriesConnect/Device/<id-seguro>
+```
+
+D-Bus path elements only accept `[A-Za-z0-9_]`, while KDE Connect ids may
+contain `-`, so every other character is replaced by `_`. The raw id is always
+available as the `DeviceId` property: **clients must use `DeviceId`, not the
+path, to identify a device**. Do not build paths by hand; use
+`GetManagedObjects()` or the path announced by `InterfacesAdded`.
+
+An object is created when the daemon learns about a device (discovery or the
+persisted trust store) and stays while the daemon knows it. Unpairing keeps the
+object and only flips `Paired` to `false`; the phone usually reappears over
+discovery, unpaired.
+
+### Properties
+
+All properties are read-only.
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `DeviceId` | `s` | KDE Connect device id (authoritative) |
+| `DeviceName` | `s` | Device name announced in the identity |
+| `DeviceType` | `s` | `phone`, `tablet`, `desktop`, `unknown`… |
+| `Paired` | `b` | Whether the device is paired with this daemon |
+| `Connected` | `b` | Whether it has an active control channel |
+| `Plugins` | `a{sb}` | Every implemented plugin and whether it is enabled for this device |
+
+Changes are announced with `org.freedesktop.DBus.Properties.PropertiesChanged`
+on the device object. `Plugins` always lists every plugin the daemon
+implements; plugins absent from `devices/<id>/device.json` count as enabled.
+
+### Methods
+
+| Method | Signature | Description |
+| --- | --- | --- |
+| `Unpair()` | `-` | Forgets the pairing and notifies the phone when connected |
+| `Ping(message)` | `s` | Pings the device; the message may be empty. Fails if it cannot be delivered |
+| `DismissNotification(notificationId)` | `s` | Dismisses a notification locally and on the phone |
+| `SetPluginEnabled(plugin, enabled)` | `sb` | Enables or disables a plugin; fails for unsupported plugins |
+
+### Signals
+
+| Signal | Payload | Meaning |
+| --- | --- | --- |
+| `PingReceived` | `(message)` | The device pinged us (the message may be empty) |
+| `NotificationReceived` | `(id, appName, title, text)` | The phone posted a notification |
+| `NotificationDismissed` | `(id)` | A notification was dismissed, locally or on the phone |
+
+Client-side proxies are bound to a path, so a client that uses proxies creates
+one per device. A raw message stream (or `busctl monitor`) can instead filter
+by interface and member and receive the signals of every device without
+knowing the paths in advance.
+
+## ObjectManager
+
+`/dev/zotta/AriesConnect`, interface `org.freedesktop.DBus.ObjectManager`.
+
+| Element | Signature |
+| --- | --- |
+| `GetManagedObjects()` | `a{oa{sa{sv}}}` |
+| `InterfacesAdded` | `(o, a{sa{sv}})` |
+| `InterfacesRemoved` | `(o, as)` |
+
+`GetManagedObjects()` returns one entry per device object with all its
+properties, which is enough to build the initial view in a single call.
+`InterfacesAdded` is emitted when a new device object is registered.
 
 ## Pairing flow
 
 1. The phone requests pairing over the control channel.
-2. The daemon emits `PairingRequested(id, name)`.
+2. The daemon emits `PairingRequested(id, name)` on the service object.
 3. The client calls `AcceptPairing(id)` or `RejectPairing(id)` within 30 s.
-4. The daemon replies to the phone and emits `PairingAccepted` or
-   `PairingRejected`.
+4. On accept, the device object appears (if new) and `Paired` becomes `true`
+   (`PropertiesChanged`). On reject, the daemon emits
+   `PairingRejected(id, reason)`.
 
 ## Unpairing flow
 
-1. The client calls `Unpair(id)`.
-2. The daemon sends `kdeconnect.pair: false` through the device's active control
+1. The client calls `Unpair()` on the device object.
+2. The daemon sends `kdeconnect.pair: false` through the active control
    channel, so the phone drops its side too. This only reaches the phone while
    it is connected.
 3. The daemon deletes `devices/<id>/`, clears the device's notifications and
-   emits `PairingRemoved(id)`.
-4. The phone closes the control channel; the daemon then emits
-   `Disconnected(id)`.
+   sets `Paired` to `false` (`PropertiesChanged`). The object stays, because
+   the device is still known.
+4. The phone closes the control channel; `Connected` becomes `false`.
 
 An unpair requested by the phone (`kdeconnect.pair: false`) follows the same
-local cleanup and emits `PairingRemoved`, but no packet is echoed back.
+local cleanup and leaves `Paired` at `false`, without echoing a packet back.
 
 ## Ping
 
-`PingDevice(deviceId, message)` asks the phone to show a ping notification. The
-message is optional and may be empty; the phone falls back to its generic
-"Ping!" text. There is no acknowledgement on the wire, but the call **fails**
-with a D-Bus error (`org.freedesktop.DBus.Error.Failed`) when the ping cannot
-be delivered:
+`Ping(message)` asks the phone to show a ping notification. The message is
+optional and may be empty; the phone falls back to its generic "Ping!" text.
+There is no acknowledgement on the wire, but the call **fails** with a D-Bus
+error (`org.freedesktop.DBus.Error.Failed`) when the ping cannot be delivered:
 
-- the device is unknown or not paired;
+- the device is not paired;
 - the `kdeconnect.ping` plugin is disabled for it;
 - it has no active control channel, i.e. the phone is offline.
 
-A ping sent by the phone emits `PingReceived(deviceId, message)`. Incoming
-pings from unpaired devices, or from devices with the plugin disabled, are
-dropped with a debug log and no signal.
+A ping sent by the phone emits `PingReceived(message)` on the device object.
+Incoming pings from unpaired devices, or from devices with the plugin
+disabled, are dropped with a debug log and no signal.
 
-Plugin state is local to the daemon: disabling `kdeconnect.ping` does not notify
-the phone, which keeps offering the action until it reconnects. Clients learn
-about changes through `PluginStateChanged`, or by querying `PluginEnabled`; the
-toggle is persisted in `devices/<id>/device.json`.
+## Notifications
+
+`ActiveNotifications()` on the service object aggregates the notifications of
+every device. `NotificationReceived` and `NotificationDismissed` are emitted on
+the corresponding device object, and `DismissNotification(id)` is a device
+method.
+
+Notifications are kept in memory across reconnects (Android replaces its socket
+frequently); they are cleared when the device is unpaired or when its
+notifications plugin is disabled. Clients should refresh `ActiveNotifications()`
+when they receive `PropertiesChanged` for `Plugins`.
+
+## Plugins
+
+`Plugins` lists every plugin implemented by the daemon (`kdeconnect.notification`
+and `kdeconnect.ping`) with its state for that device. Toggling one:
 
 ```sh
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect PingDevice ss <deviceId> ""
-
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect PluginEnabled ss <deviceId> kdeconnect.ping
-
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect SetPluginEnabled ssb <deviceId> kdeconnect.ping false
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device SetPluginEnabled sb kdeconnect.ping false
 ```
+
+`SetPluginEnabled` fails for plugins the daemon does not implement and for
+unpaired devices. Setting the value it already has is a silent no-op. A real
+change is persisted in `devices/<id>/device.json` and announced with
+`PropertiesChanged` on `Plugins`.
+
+Plugin state is **local**: toggling a plugin neither rewrites the identity nor
+notifies the phone, so the phone keeps offering that plugin until it
+reconnects. Disabling notifications drops that device's mirrored
+notifications; reenabling starts empty.
 
 ## Examples
 
 ```sh
-busctl --user introspect dev.zotta.AriesConnect /dev/zotta/AriesConnect
+# list device objects and all their properties
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect Devices
+  org.freedesktop.DBus.ObjectManager GetManagedObjects
 
-# listen for signals
+# inspect one device
+busctl --user introspect dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id>
+
+busctl --user get-property dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> dev.zotta.AriesConnect.Device DeviceName
+
+# listen for signals (device and service)
 busctl --user monitor dev.zotta.AriesConnect
 
 # accept a pending pairing request
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
   dev.zotta.AriesConnect AcceptPairing s <deviceId>
 
+# snapshot of known devices
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect Devices
+
 # list active notifications
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
   dev.zotta.AriesConnect ActiveNotifications
 
 # dismiss a notification on the phone as well
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect DismissNotification ss <deviceId> <notificationId>
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device DismissNotification s <notificationId>
 
 # unpair a device (also removes its persisted state)
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect Unpair s <deviceId>
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device Unpair
 
 # ping a device (the message may be empty)
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect PingDevice ss <deviceId> "Hello from the desktop"
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device Ping s "Hello from the desktop"
 
-# check and toggle the notifications plugin of a device
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect PluginEnabled ss <deviceId> kdeconnect.notification
-
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect SetPluginEnabled ssb <deviceId> \
-  kdeconnect.notification false
+# toggle the ping plugin of a device
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device SetPluginEnabled sb kdeconnect.ping false
 ```

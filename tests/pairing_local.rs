@@ -426,7 +426,8 @@ async fn disabled_ping_plugin_blocks_both_directions() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     app.mark_paired(PHONE_ID).await;
     app.set_plugin_enabled(PHONE_ID, "kdeconnect.ping", false)
-        .await;
+        .await
+        .expect("ping plugin toggle");
 
     // Incoming pings are dropped.
     send_packet(&mut reader, &phone_ping("Hello")).await;

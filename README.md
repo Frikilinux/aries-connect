@@ -12,7 +12,7 @@ control channel and exposes devices, pairing and events over D-Bus
 | Discovery (UDP 1716) | Implemented |
 | Control channel (TCP 1716, TLS, protocol v8) | Implemented |
 | Pairing and unpairing with certificate pinning | Implemented |
-| D-Bus API (`dev.zotta.AriesConnect`) | Implemented |
+| D-Bus API (`dev.zotta.AriesConnect`, per-device objects) | Implemented |
 | Notification mirroring | Implemented |
 | Ping | Implemented |
 | Per-device plugin configuration | Implemented |

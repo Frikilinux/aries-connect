@@ -69,40 +69,43 @@ busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
   dev.zotta.AriesConnect RejectPairing s <deviceId>
 ```
 
-To unpair from the computer:
+Each known device is also a D-Bus object under
+`/dev/zotta/AriesConnect/Device/<id>`. To unpair from the computer:
 
 ```sh
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect Unpair s <deviceId>
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device Unpair
 ```
 
 The daemon sends `kdeconnect.pair: false` to the phone so it drops its side
-too, then deletes the whole `devices/<id>/` directory and emits
-`PairingRemoved`. The phone must be connected at that moment to receive the
-notification; otherwise only the local state is cleared and the phone keeps its
-side until it pairs again.
+too, then deletes the whole `devices/<id>/` directory and flips the device's
+`Paired` property to `false`. The phone must be connected at that moment to
+receive the notification; otherwise only the local state is cleared and the
+phone keeps its side until it pairs again.
 
-Unpairing from the phone (`kdeconnect.pair: false`) removes the device from the
-store (the whole `devices/<id>/` directory) and emits `PairingRemoved`.
+Unpairing from the phone (`kdeconnect.pair: false`) removes the same local
+state (`devices/<id>/`) and also leaves `Paired` at `false`.
 
 ## Ping
 
 Once a device is paired and connected, the desktop can ping it:
 
 ```sh
-busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
-  dev.zotta.AriesConnect PingDevice ss <deviceId> "Hello from the desktop"
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device Ping s "Hello from the desktop"
 ```
 
 The message may be empty. The phone shows a notification; it does not reply.
-`PingDevice` fails with a D-Bus error when the device is not paired, the
+`Ping` fails with a D-Bus error when the device is not paired, the
 `kdeconnect.ping` plugin is disabled for it or it is not connected.
 
-Pings sent by the phone appear as the `PingReceived(deviceId, message)` signal;
-they are ignored when the plugin is disabled for that device. The plugin can be
-toggled with `SetPluginEnabled` like any other. Toggling is local only (the
-phone is not notified) and is announced to clients with `PluginStateChanged`;
-query `PluginEnabled` for the current state.
+Pings sent by the phone appear as the `PingReceived(message)` signal on the
+device object; they are ignored when the plugin is disabled for that device.
+The plugin can be toggled with `SetPluginEnabled` like any other. Toggling is
+local only (the phone is not notified) and is announced with `PropertiesChanged`
+on the `Plugins` property, which always lists the current state.
 
 The phone learns the available plugins from the identity it receives when it
 connects, so restart the phone app (or wait for it to reconnect) after upgrading
@@ -121,11 +124,11 @@ the daemon for the ping action to appear.
 - **The certificate warning appears again**: the state directory was deleted or
   recreated.
 - **The phone does not show the ping action**: restart the phone app so it
-  fetches the daemon identity again, and check that the `kdeconnect.ping`
-  plugin is enabled for the device (`PluginEnabled`).
-- **`PingDevice` fails**: the error says whether the device is unpaired, the
-  plugin is disabled or the phone is not connected. `Devices()` reports the
-  connection state.
+  fetches the daemon identity again, and check the device's `Plugins` property
+  to confirm `kdeconnect.ping` is enabled.
+- **`Ping` fails**: the error says whether the device is not paired, the plugin
+  is disabled or the phone is not connected. The `Connected` and `Paired`
+  properties report the device state.
 - **Notifications stop when the phone screen is off**: Android is suspending the
   KDE Connect app or filtering its network traffic. Set the app's battery usage
   to unrestricted, enable its persistent notification and keep Wi-Fi active
