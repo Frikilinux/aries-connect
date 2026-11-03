@@ -109,9 +109,10 @@ listed in `plugins` carry an explicit `false`; anything absent is enabled, so
 defaults keep working as plugins are added. Device files are written atomically
 (temporary file plus rename) and only when a value actually changed.
 
-- `SetPluginEnabled(deviceId, plugin, bool)` toggles one plugin; the change is
-  persisted and announced with the `PluginStateChanged` signal. Only real
-  changes emit it: unknown devices and repeated values are silent no-ops.
+- `SetPluginEnabled(plugin, bool)` on the device object toggles one plugin; the
+  change is persisted and announced with `PropertiesChanged` on the device's
+  `Plugins` property. Only real changes update it: repeated values are silent
+  no-ops, and unsupported plugins are rejected with a D-Bus error.
 - Plugin state is **local**: toggling a plugin neither rewrites the identity nor
   notifies the phone, so the phone keeps offering that plugin until it
   reconnects. Outgoing packets of a disabled plugin are not sent either.

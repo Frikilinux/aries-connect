@@ -95,23 +95,24 @@ pub struct LocalIdentity {
 
 impl LocalIdentity {
     /// Capabilities declared by this iteration.
+    ///
+    /// The supported plugins are derived from [`crate::plugins::supported_plugins`]
+    /// so the identity cannot drift from the `Plugins` property.
     pub fn new(device_id: String, device_name: String, tcp_port: u16) -> Self {
+        let mut capabilities: Vec<String> = vec!["kdeconnect.pair".to_owned()];
+        capabilities.extend(
+            crate::plugins::supported_plugins()
+                .iter()
+                .map(|plugin| (*plugin).to_owned()),
+        );
+        capabilities.push("kdeconnect.notification.request".to_owned());
+
         Self {
             device_id,
             device_name,
             tcp_port,
-            incoming_capabilities: vec![
-                "kdeconnect.pair".to_owned(),
-                "kdeconnect.notification".to_owned(),
-                "kdeconnect.notification.request".to_owned(),
-                "kdeconnect.ping".to_owned(),
-            ],
-            outgoing_capabilities: vec![
-                "kdeconnect.pair".to_owned(),
-                "kdeconnect.notification".to_owned(),
-                "kdeconnect.notification.request".to_owned(),
-                "kdeconnect.ping".to_owned(),
-            ],
+            incoming_capabilities: capabilities.clone(),
+            outgoing_capabilities: capabilities,
         }
     }
 
