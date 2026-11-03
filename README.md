@@ -7,13 +7,18 @@ control channel and exposes devices, pairing and events over D-Bus
 
 ## Current status
 
+### Core
+
 - [x] Discovery (UDP 1716)
 - [x] Control channel (TCP 1716, TLS, protocol v8)
 - [x] Pairing and unpairing with certificate pinning
 - [x] D-Bus API (`dev.zotta.AriesConnect`, per-device objects)
-- [x] Notification mirroring
-- [x] Ping
-- [x] Per-device plugin configuration
+- [x] Per-device plugin configuration (`Plugins`, `SetPluginEnabled`)
+
+### Plugins
+
+- [x] Notifications (`kdeconnect.notification`)
+- [x] Ping (`kdeconnect.ping`)
 - [ ] Battery (`kdeconnect.battery`)
 - [ ] Clipboard (`kdeconnect.clipboard`)
 
