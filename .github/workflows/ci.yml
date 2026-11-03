@@ -3,7 +3,22 @@ name: CI
 on:
   push:
     branches: [main]
+    # Documentation-only pushes cannot break the build.
+    paths-ignore:
+      - "doc/**"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "LICENSE"
+      - "contrib/**"
+      - ".gitignore"
   pull_request:
+    paths-ignore:
+      - "doc/**"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "LICENSE"
+      - "contrib/**"
+      - ".gitignore"
   workflow_dispatch:
 
 concurrency:
