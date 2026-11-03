@@ -65,8 +65,10 @@ All properties are read-only.
 | `DeviceName` | `s` | Device name announced in the identity |
 | `DeviceType` | `s` | `phone`, `tablet`, `desktop`, `unknown`… |
 | `Paired` | `b` | Whether the device is paired with this daemon |
-| `Connected` | `b` | Whether it has an active control channel |
+| `Connected` | `b` | Whether it has an active control channel (silent disconnects are detected in ~30 s via TCP keepalive) |
 | `Plugins` | `a{sb}` | Every implemented plugin and whether it is enabled for this device |
+| `BatteryLevel` | `i` | Last reported charge (`0..=100`), or `-1` when unknown |
+| `IsCharging` | `b` | Whether the device reported that it is charging |
 
 Changes are announced with `org.freedesktop.DBus.Properties.PropertiesChanged`
 on the device object. `Plugins` always lists every plugin the daemon
@@ -146,6 +148,30 @@ A ping sent by the phone emits `PingReceived(message)` on the device object.
 Incoming pings from unpaired devices, or from devices with the plugin
 disabled, are dropped with a debug log and no signal.
 
+## Battery
+
+The phone pushes `kdeconnect.battery` when the control channel is established
+and whenever the charge, the charging state or the low-battery threshold
+changes. `BatteryLevel` and `IsCharging` mirror the last report and are
+announced with `PropertiesChanged` on the device object.
+
+`BatteryLevel` is `-1` until the first report, when the device has no battery,
+when the plugin is disabled, after unpairing and when the control channel
+closes. The cached value is dropped on disconnect, so `BatteryLevel` never
+shows stale data while the phone is offline; it is repopulated when the phone
+reconnects and pushes its status. The deprecated `kdeconnect.battery.request`
+packet is not used: the phone sends its state on its own.
+
+Disabling the plugin only hides the battery data (`BatteryLevel` becomes `-1`
+and `IsCharging` becomes `false`); it does not disconnect the device, so
+`Connected` stays `true`. Enabling it again starts from `-1` until the phone
+sends a new status, which may not happen until the level changes.
+
+Silent disconnects (Wi-Fi turned off, phone out of range) are detected with TCP
+keepalive: the daemon probes the control channel after 15 s of inactivity and
+gives up after three unanswered probes, so `Connected` flips to `false` and the
+battery status is cleared within roughly 30 s.
+
 ## Notifications
 
 `ActiveNotifications()` on the service object aggregates the notifications of
@@ -222,6 +248,10 @@ busctl --user call dev.zotta.AriesConnect \
 busctl --user call dev.zotta.AriesConnect \
   /dev/zotta/AriesConnect/Device/<id> \
   dev.zotta.AriesConnect.Device Ping s "Hello from the desktop"
+
+# read the last reported battery state
+busctl --user get-property dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> dev.zotta.AriesConnect.Device BatteryLevel
 
 # toggle the ping plugin of a device
 busctl --user call dev.zotta.AriesConnect \

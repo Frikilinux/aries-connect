@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Battery plugin (`kdeconnect.battery`): `BatteryLevel` and `IsCharging`
+  properties on the device object, updated from the status packets pushed by
+  the phone, announced with `PropertiesChanged` and cleared when the control
+  channel closes.
+
+### Fixed
+
+- Detect control channels that die without a FIN (Wi-Fi off, phone out of
+  range) with TCP keepalive, so `Connected` no longer stays `true` and the
+  battery status is not stuck at the last reported value.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added
