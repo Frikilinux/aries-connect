@@ -16,6 +16,7 @@ use tokio_rustls::TlsAcceptor;
 
 use aries_connect::app::{App, Event, PairDecision, PingError};
 use aries_connect::identity::{pair_packet, parse_identity, LocalIdentity, NetworkPacket};
+use aries_connect::plugins::battery::BatteryStatus;
 use aries_connect::tls::IdentityCertificate;
 
 const DAEMON_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -453,4 +454,118 @@ async fn disabled_ping_plugin_blocks_both_directions() {
     );
     let packet = tokio::time::timeout(Duration::from_secs(1), read_packet(&mut reader)).await;
     assert!(packet.is_err(), "disabled plugin must not send pings");
+}
+
+/// Simulated `kdeconnect.battery` packet.
+fn battery_packet(level: i64, charging: bool) -> NetworkPacket {
+    NetworkPacket::new(
+        "kdeconnect.battery",
+        serde_json::json!({ "currentCharge": level, "isCharging": charging }),
+    )
+}
+
+#[tokio::test]
+async fn battery_flow_works() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    app.mark_paired(PHONE_ID).await;
+
+    send_packet(&mut reader, &battery_packet(75, true)).await;
+    let event = wait_event(&mut events, |e| matches!(e, Event::BatteryChanged { .. })).await;
+    match event {
+        Event::BatteryChanged {
+            device_id,
+            level,
+            charging,
+        } => {
+            assert_eq!(device_id, PHONE_ID);
+            assert_eq!(level, 75);
+            assert!(charging);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert_eq!(
+        app.battery.get(PHONE_ID).await,
+        BatteryStatus {
+            level: 75,
+            charging: true
+        }
+    );
+}
+
+#[tokio::test]
+async fn battery_from_unpaired_devices_is_ignored() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+
+    send_packet(&mut reader, &battery_packet(50, false)).await;
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match events.recv().await {
+                Some(Event::BatteryChanged { .. }) => return,
+                Some(_) => {}
+                None => return,
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_err(),
+        "unpaired devices must not report battery"
+    );
+    assert_eq!(app.battery.get(PHONE_ID).await, BatteryStatus::UNKNOWN);
+}
+
+#[tokio::test]
+async fn disabled_battery_plugin_ignores_updates() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    app.mark_paired(PHONE_ID).await;
+    app.set_plugin_enabled(PHONE_ID, "kdeconnect.battery", false)
+        .await
+        .expect("battery plugin toggle");
+
+    send_packet(&mut reader, &battery_packet(50, false)).await;
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match events.recv().await {
+                Some(Event::BatteryChanged { .. }) => return,
+                Some(_) => {}
+                None => return,
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_err(),
+        "disabled plugin must drop incoming battery updates"
+    );
+    assert_eq!(app.battery.get(PHONE_ID).await, BatteryStatus::UNKNOWN);
+}
+
+#[tokio::test]
+async fn disconnect_clears_battery_status() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+
+    send_packet(&mut reader, &battery_packet(75, true)).await;
+    wait_event(&mut events, |e| matches!(e, Event::BatteryChanged { .. })).await;
+    assert_eq!(
+        app.battery.get(PHONE_ID).await,
+        BatteryStatus {
+            level: 75,
+            charging: true
+        }
+    );
+
+    drop(reader);
+    wait_event(&mut events, |e| matches!(e, Event::Disconnected { .. })).await;
+    assert_eq!(
+        app.battery.get(PHONE_ID).await,
+        BatteryStatus::UNKNOWN,
+        "the last battery status must not survive a disconnect"
+    );
 }

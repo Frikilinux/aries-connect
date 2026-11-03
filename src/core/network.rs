@@ -36,6 +36,30 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const SECURE_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Minimum protocol version we accept (v8 = double identity exchange).
 const MIN_PROTOCOL_VERSION: i64 = 8;
+/// TCP keepalive idle time before the first probe.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(15);
+/// Time between keepalive probes once the peer stops answering.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+/// Failed probes before the socket is considered dead (~30 s in total).
+const KEEPALIVE_RETRIES: u32 = 3;
+
+/// Enables TCP keepalive on an accepted control channel.
+///
+/// Without it, a peer that vanishes without closing its socket (Wi-Fi turned
+/// off, phone out of range) leaves a half-open connection that looks alive
+/// forever: `Connected` would stay `true` and the cached battery status would
+/// never be cleared. With these values the kernel declares the peer dead after
+/// roughly `KEEPALIVE_IDLE + KEEPALIVE_INTERVAL * KEEPALIVE_RETRIES`.
+fn enable_keepalive(stream: &TcpStream) -> io::Result<()> {
+    let socket = socket2::SockRef::from(stream);
+    socket.set_keepalive(true)?;
+    socket.set_tcp_keepalive(
+        &socket2::TcpKeepalive::new()
+            .with_time(KEEPALIVE_IDLE)
+            .with_interval(KEEPALIVE_INTERVAL)
+            .with_retries(KEEPALIVE_RETRIES),
+    )
+}
 
 /// TCP listener bound with SO_REUSEADDR (port 1716 is shared with UDP).
 async fn tcp_listener(port: u16) -> io::Result<TcpListener> {
@@ -80,6 +104,9 @@ async fn accept_loop(app: Arc<App>, connector: TlsConnector, listener: TcpListen
             }
         };
         tracing::debug!(%peer, "incoming TCP connection");
+        if let Err(e) = enable_keepalive(&stream) {
+            tracing::warn!(%peer, error = %e, "failed to enable TCP keepalive");
+        }
         let app: Arc<App> = app.clone();
         let connector = connector.clone();
         tokio::spawn(async move {
@@ -325,6 +352,8 @@ async fn handle_connection(
     if was_current {
         tracing::info!(device = %peer_id, "control channel closed");
         app.registry.set_connected(&peer_id, false).await;
+        // Do not keep a stale battery level while the phone is offline.
+        app.battery.clear_device(&peer_id).await;
         let _ = app.events.send(Event::Disconnected {
             id: peer_id.clone(),
         });
@@ -359,6 +388,9 @@ async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket
             // must not block reading further packets on this connection.
             tokio::spawn(pairing::handle_pair(app.clone(), peer_id, accept));
         }
+        "kdeconnect.battery" => {
+            crate::plugins::battery::handle_packet(app, peer_id.as_deref(), &packet).await;
+        }
         "kdeconnect.notification" => {
             crate::plugins::notifications::handle_packet(app, peer_id.as_deref(), &packet).await;
         }
@@ -377,4 +409,22 @@ where
 {
     writer.write_all(&packet.to_frame()).await?;
     writer.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepted_sockets_enable_keepalive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local address");
+        let _client = TcpStream::connect(addr).await.expect("connect");
+        let (server, _) = listener.accept().await.expect("accept");
+
+        enable_keepalive(&server).expect("enable keepalive");
+
+        let socket = socket2::SockRef::from(&server);
+        assert!(socket.keepalive().expect("keepalive state"));
+    }
 }

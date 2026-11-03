@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::identity::{pair_packet, IdentityBody, LocalIdentity, NetworkPacket};
+use crate::plugins::battery::{self, BatteryStore};
 use crate::plugins::notifications::{self, NotificationStore};
 use crate::plugins::ping;
 use crate::trusted::{TrustedDevice, TrustedStore};
@@ -39,6 +40,12 @@ pub enum Event {
     NotificationDismissed { device_id: String, id: String },
     /// A paired device pinged us, optionally with a message.
     PingReceived { device_id: String, message: String },
+    /// The battery status of a device changed.
+    BatteryChanged {
+        device_id: String,
+        level: i32,
+        charging: bool,
+    },
     /// A per-device plugin was enabled or disabled.
     PluginStateChanged {
         device_id: String,
@@ -257,6 +264,8 @@ pub struct App {
     pub events: mpsc::UnboundedSender<Event>,
     /// Active notifications mirrored from paired devices.
     pub notifications: NotificationStore,
+    /// Last reported battery status of each device.
+    pub battery: BatteryStore,
     /// Pending pairing requests: deviceId -> decision sender.
     pending_pairs: Mutex<HashMap<String, oneshot::Sender<PairDecision>>>,
     /// Latest control channel per device.
@@ -276,6 +285,7 @@ impl App {
             trusted,
             events,
             notifications: NotificationStore::new(),
+            battery: BatteryStore::new(),
             pending_pairs: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             link_generation: AtomicU64::new(0),
@@ -328,6 +338,7 @@ impl App {
         }
         self.registry.set_paired(id, false).await;
         self.notifications.clear_device(id).await;
+        self.battery.clear_device(id).await;
         self.trusted.remove(id).await;
         let _ = self
             .events
@@ -421,8 +432,13 @@ impl App {
             tracing::debug!(device = %device_id, plugin = %plugin, "unknown plugin");
             return Err(PluginError::UnsupportedPlugin);
         }
-        if plugin == notifications::NOTIFICATION_PACKET && !enabled {
-            self.notifications.clear_device(device_id).await;
+        if !enabled {
+            if plugin == notifications::NOTIFICATION_PACKET {
+                self.notifications.clear_device(device_id).await;
+            }
+            if plugin == battery::BATTERY_PACKET {
+                self.battery.clear_device(device_id).await;
+            }
         }
         if self
             .trusted
@@ -722,5 +738,65 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn unpair_clears_battery_status() {
+        let (app, device_id, _events) = app_with_phone().await;
+        app.battery
+            .upsert(
+                &device_id,
+                battery::BatteryStatus {
+                    level: 80,
+                    charging: false,
+                },
+            )
+            .await;
+
+        assert!(app.unpair(&device_id, false).await);
+        assert_eq!(
+            app.battery.get(&device_id).await,
+            battery::BatteryStatus::UNKNOWN
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_battery_plugin_clears_status() {
+        let (app, device_id, _events) = app_with_phone().await;
+        app.battery
+            .upsert(
+                &device_id,
+                battery::BatteryStatus {
+                    level: 80,
+                    charging: true,
+                },
+            )
+            .await;
+
+        app.set_plugin_enabled(&device_id, battery::BATTERY_PACKET, false)
+            .await
+            .expect("supported plugin");
+        assert_eq!(
+            app.battery.get(&device_id).await,
+            battery::BatteryStatus::UNKNOWN
+        );
+    }
+
+    /// App with a paired phone and the battery plugin enabled.
+    async fn app_with_phone() -> (Arc<App>, String, mpsc::UnboundedReceiver<Event>) {
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let device_id = "b".repeat(32);
+        app.trusted
+            .insert(TrustedDevice {
+                id: device_id.clone(),
+                name: "Phone".to_owned(),
+                cert_sha256: None,
+                last_ip: None,
+                plugins: HashMap::new(),
+            })
+            .await;
+        (app, device_id, events_rx)
     }
 }

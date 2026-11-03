@@ -86,6 +86,33 @@ before the phone reflects it.
 Incoming pings are dropped with a debug log when they come from an unpaired
 device or when the plugin is disabled for it.
 
+## Battery
+
+The device that has a battery pushes `kdeconnect.battery` when the control
+channel is established and again whenever the charge, the charging state or the
+low-battery threshold changes:
+
+```json
+{ "currentCharge": 75, "isCharging": true, "thresholdEvent": 0 }
+```
+
+`currentCharge` is `-1` when the device has no battery, and `thresholdEvent` is
+`1` while the device considers the battery low. AriesConnect stores the last
+status per device while it is connected and exposes it as `BatteryLevel` and
+`IsCharging` on the device object, announced with `PropertiesChanged`. The
+cached status is dropped when the control channel closes, so the properties go
+back to `-1`/`false` until the phone reconnects.
+
+The old `kdeconnect.battery.request` packet is deprecated and current clients do
+not answer it, so the daemon does not send it: status updates are pushed by the
+device. Battery packets are accepted only from **paired** devices with their
+`kdeconnect.battery` plugin enabled.
+
+Note that KDE Connect Android advertises `kdeconnect.battery` in its identity
+even when the plugin is disabled for a device, so turning the plugin off on the
+phone is only visible to the daemon through the absence of updates, not through
+a capability change.
+
 ## Trust model
 
 - Pairing (`kdeconnect.pair` with `pair: true`) is surfaced to the user as a

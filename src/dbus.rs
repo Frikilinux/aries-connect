@@ -17,6 +17,7 @@ use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedObjectPath;
 
 use crate::app::{App, Device, Event, UiCommand};
+use crate::plugins::battery;
 
 pub const DBUS_NAME: &str = "dev.zotta.AriesConnect";
 pub const DBUS_PATH: &str = "/dev/zotta/AriesConnect";
@@ -169,6 +170,35 @@ impl DeviceIface {
             );
         }
         plugins
+    }
+
+    /// Last reported battery percentage: `0..=100`, or `-1` when unknown, the
+    /// device has no battery or the `kdeconnect.battery` plugin is disabled.
+    #[zbus(property)]
+    async fn battery_level(&self) -> i32 {
+        if !self
+            .app
+            .trusted
+            .plugin_enabled(&self.device_id, battery::BATTERY_PACKET)
+            .await
+        {
+            return -1;
+        }
+        self.app.battery.get(&self.device_id).await.level
+    }
+
+    /// Whether the device reported that it is charging.
+    #[zbus(property)]
+    async fn is_charging(&self) -> bool {
+        if !self
+            .app
+            .trusted
+            .plugin_enabled(&self.device_id, battery::BATTERY_PACKET)
+            .await
+        {
+            return false;
+        }
+        self.app.battery.get(&self.device_id).await.charging
     }
 
     /// Forget the pairing, notifying the peer when it is connected.
@@ -337,6 +367,8 @@ enum DeviceProperty {
     Paired,
     Connected,
     Plugins,
+    BatteryLevel,
+    IsCharging,
 }
 
 /// Emits `PropertiesChanged` for one device property, reading the new value
@@ -367,6 +399,8 @@ async fn emit_property_changed(conn: &zbus::Connection, device_id: &str, propert
         DeviceProperty::Paired => iface.paired_changed(emitter).await,
         DeviceProperty::Connected => iface.connected_changed(emitter).await,
         DeviceProperty::Plugins => iface.plugins_changed(emitter).await,
+        DeviceProperty::BatteryLevel => iface.battery_level_changed(emitter).await,
+        DeviceProperty::IsCharging => iface.is_charging_changed(emitter).await,
     };
     if let Err(e) = result {
         tracing::warn!(
@@ -426,6 +460,8 @@ async fn event_loop(
             }
             Event::Disconnected { id } => {
                 emit_property_changed(&conn, &id, DeviceProperty::Connected).await;
+                emit_property_changed(&conn, &id, DeviceProperty::BatteryLevel).await;
+                emit_property_changed(&conn, &id, DeviceProperty::IsCharging).await;
             }
             Event::PairingRequested { id, name } => {
                 if let Err(e) = AriesConnectIface::pairing_requested(&service, id, name).await {
@@ -442,9 +478,21 @@ async fn event_loop(
             }
             Event::PairingRemoved { id } => {
                 emit_property_changed(&conn, &id, DeviceProperty::Paired).await;
+                emit_property_changed(&conn, &id, DeviceProperty::BatteryLevel).await;
+                emit_property_changed(&conn, &id, DeviceProperty::IsCharging).await;
             }
-            Event::PluginStateChanged { device_id, .. } => {
+            Event::PluginStateChanged {
+                device_id, plugin, ..
+            } => {
                 emit_property_changed(&conn, &device_id, DeviceProperty::Plugins).await;
+                if plugin == battery::BATTERY_PACKET {
+                    emit_property_changed(&conn, &device_id, DeviceProperty::BatteryLevel).await;
+                    emit_property_changed(&conn, &device_id, DeviceProperty::IsCharging).await;
+                }
+            }
+            Event::BatteryChanged { device_id, .. } => {
+                emit_property_changed(&conn, &device_id, DeviceProperty::BatteryLevel).await;
+                emit_property_changed(&conn, &device_id, DeviceProperty::IsCharging).await;
             }
             Event::NotificationReceived {
                 device_id,
@@ -559,5 +607,81 @@ mod tests {
         assert_eq!(plugins.len(), crate::plugins::supported_plugins().len());
         assert_eq!(plugins.get("kdeconnect.ping"), Some(&false));
         assert_eq!(plugins.get("kdeconnect.notification"), Some(&true));
+        assert_eq!(plugins.get("kdeconnect.battery"), Some(&true));
+    }
+
+    async fn device_iface(plugins: HashMap<String, bool>) -> DeviceIface {
+        use tokio::sync::mpsc;
+
+        use crate::app::App;
+        use crate::identity::LocalIdentity;
+        use crate::trusted::{TrustedDevice, TrustedStore};
+
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let device_id = "b".repeat(32);
+        app.trusted
+            .insert(TrustedDevice {
+                id: device_id.clone(),
+                name: "Phone".to_owned(),
+                cert_sha256: None,
+                last_ip: None,
+                plugins,
+            })
+            .await;
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        DeviceIface {
+            app,
+            cmd_tx,
+            device_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn battery_properties_default_to_unknown() {
+        let iface = device_iface(HashMap::new()).await;
+
+        assert_eq!(iface.battery_level().await, -1);
+        assert!(!iface.is_charging().await);
+    }
+
+    #[tokio::test]
+    async fn battery_properties_report_the_last_status() {
+        let iface = device_iface(HashMap::new()).await;
+        iface
+            .app
+            .battery
+            .upsert(
+                &iface.device_id,
+                battery::BatteryStatus {
+                    level: 42,
+                    charging: true,
+                },
+            )
+            .await;
+
+        assert_eq!(iface.battery_level().await, 42);
+        assert!(iface.is_charging().await);
+    }
+
+    #[tokio::test]
+    async fn battery_properties_hide_status_when_plugin_disabled() {
+        let plugins = HashMap::from([(battery::BATTERY_PACKET.to_owned(), false)]);
+        let iface = device_iface(plugins).await;
+        iface
+            .app
+            .battery
+            .upsert(
+                &iface.device_id,
+                battery::BatteryStatus {
+                    level: 42,
+                    charging: true,
+                },
+            )
+            .await;
+
+        assert_eq!(iface.battery_level().await, -1);
+        assert!(!iface.is_charging().await);
     }
 }
