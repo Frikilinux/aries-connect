@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 ### Added
 
 - Per-device D-Bus objects (`dev.zotta.AriesConnect.Device`) served under
@@ -38,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SetPluginEnabled` now fails for unpaired devices and for plugins the daemon
   does not implement.
 - Binary release archives now ship the `contrib/` directory.
+- CI skips documentation-only pushes: changes limited to `doc/`, `README.md`,
+  `CHANGELOG.md`, `LICENSE`, `contrib/` or `.gitignore` do not start a run.
 
 ## [0.2.0] - 2026-11-01
 
@@ -81,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RejectPairing` methods plus device and pairing signals.
 - Persisted RSA-2048 identity certificate and 32-character device id.
 
-[Unreleased]: https://github.com/Frikilinux/aries-connect/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Frikilinux/aries-connect/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Frikilinux/aries-connect/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Frikilinux/aries-connect/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Frikilinux/aries-connect/releases/tag/v0.1.0
