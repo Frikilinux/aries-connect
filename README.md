@@ -21,6 +21,7 @@ control channel and exposes devices, pairing and events over D-Bus
 - [x] Ping (`kdeconnect.ping`)
 - [x] Battery (`kdeconnect.battery`)
 - [x] Clipboard (`kdeconnect.clipboard`)
+- [ ] Share (`kdeconnect.share.request`)
 
 ## Requirements
 
