@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Detect control channels that die without a FIN (Wi-Fi off, phone out of
   range) with TCP keepalive, so `Connected` no longer stays `true` and the
   battery status is not stuck at the last reported value.
+- Keep notification clients in sync: announce `NotificationDismissed` for
+  entries evicted by the per-device limit and for cancellations of unknown ids,
+  order the notification snapshot deterministically, and make
+  `DismissNotification` fail when the device is unpaired, the notification is
+  inactive or the plugin is disabled.
 
 ## [0.3.0] - 2026-11-02
 

@@ -229,7 +229,7 @@ async fn notification_flow_works() {
     assert_eq!(active[0].1.id, "n1");
 
     // Dismissal from the desktop: removed locally, forwarded to the phone.
-    assert!(app.dismiss_notification(PHONE_ID, "n1").await);
+    assert!(app.dismiss_notification(PHONE_ID, "n1").await.is_ok());
     let dismiss = tokio::time::timeout(Duration::from_secs(5), read_packet(&mut reader))
         .await
         .expect("dismiss packet");
