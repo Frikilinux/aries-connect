@@ -47,26 +47,33 @@ impl NotificationStore {
         Self::default()
     }
 
-    /// Inserts or replaces a notification. Returns whether it was new.
-    pub async fn upsert(&self, device_id: &str, notification: Notification) -> bool {
+    /// Inserts or replaces a notification. Returns whether it was new and the
+    /// ids evicted to stay under [`MAX_PER_DEVICE`], oldest first.
+    pub async fn upsert(&self, device_id: &str, notification: Notification) -> (bool, Vec<String>) {
         let mut devices = self.devices.write().await;
         let per_device = devices.entry(device_id.to_owned()).or_default();
+        let new_id = notification.id.clone();
         let is_new = per_device
             .insert(notification.id.clone(), notification)
             .is_none();
+        let mut evicted = Vec::new();
         while per_device.len() > MAX_PER_DEVICE {
+            // Never evict the entry that was just inserted, even when it
+            // carries an old timestamp (a re-posted ongoing notification).
             let oldest = per_device
                 .values()
-                .min_by_key(|n| n.time)
+                .filter(|n| n.id != new_id)
+                .min_by(|a, b| a.time.cmp(&b.time).then_with(|| a.id.cmp(&b.id)))
                 .map(|n| n.id.clone());
             match oldest {
                 Some(id) => {
                     per_device.remove(&id);
+                    evicted.push(id);
                 }
                 None => break,
             }
         }
-        is_new
+        (is_new, evicted)
     }
 
     /// Removes one notification; returns it when present.
@@ -98,7 +105,7 @@ impl NotificationStore {
                 out.push((device_id.clone(), notification.clone()));
             }
         }
-        out.sort_by_key(|(_, notification)| notification.time);
+        out.sort_by(|(_, a), (_, b)| a.time.cmp(&b.time).then_with(|| a.id.cmp(&b.id)));
         out
     }
 }
@@ -182,12 +189,20 @@ pub async fn handle_packet(
     );
 
     if body.is_cancel {
-        if app.notifications.remove(device_id, &id).await.is_some() {
-            let _ = app.events.send(Event::NotificationDismissed {
-                device_id: device_id.to_owned(),
-                id,
-            });
+        let removed = app.notifications.remove(device_id, &id).await;
+        if removed.is_none() {
+            tracing::debug!(
+                device = %device_id,
+                id = %id,
+                "dismissal for an unknown notification"
+            );
         }
+        // Emit even for unknown ids: a client that still mirrors the entry
+        // (for example after it was evicted) must be able to drop it.
+        let _ = app.events.send(Event::NotificationDismissed {
+            device_id: device_id.to_owned(),
+            id,
+        });
         return true;
     }
 
@@ -203,9 +218,21 @@ pub async fn handle_packet(
         app = %notification.app_name,
         "notification received"
     );
-    app.notifications
+    let (_is_new, evicted) = app
+        .notifications
         .upsert(device_id, notification.clone())
         .await;
+    for id in evicted {
+        tracing::debug!(
+            device = %device_id,
+            id = %id,
+            "notification evicted to stay under the per-device limit"
+        );
+        let _ = app.events.send(Event::NotificationDismissed {
+            device_id: device_id.to_owned(),
+            id,
+        });
+    }
     let _ = app.events.send(Event::NotificationReceived {
         device_id: device_id.to_owned(),
         id: notification.id,
@@ -258,9 +285,11 @@ mod tests {
     }
 
     /// Paired device with `plugin` disabled or enabled via per-device overrides.
-    async fn app_with_plugins(plugins: HashMap<String, bool>) -> Arc<App> {
+    async fn app_with_plugins(
+        plugins: HashMap<String, bool>,
+    ) -> (Arc<App>, mpsc::UnboundedReceiver<Event>) {
         let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
-        let (events, _rx) = mpsc::unbounded_channel();
+        let (events, events_rx) = mpsc::unbounded_channel();
         let app = App::new(local, events, TrustedStore::in_memory());
         app.trusted
             .insert(TrustedDevice {
@@ -271,13 +300,20 @@ mod tests {
                 plugins,
             })
             .await;
-        app
+        (app, events_rx)
+    }
+
+    fn notification_packet(id: &str, time: i64) -> NetworkPacket {
+        NetworkPacket::new(
+            NOTIFICATION_PACKET,
+            serde_json::json!({ "id": id, "appName": "App", "time": time }),
+        )
     }
 
     #[tokio::test]
     async fn ignores_notifications_when_plugin_disabled() {
         let plugins = HashMap::from([(NOTIFICATION_PACKET.to_owned(), false)]);
-        let app = app_with_plugins(plugins).await;
+        let (app, _events) = app_with_plugins(plugins).await;
         let device_id = "b".repeat(32);
         let packet = NetworkPacket::new(
             NOTIFICATION_PACKET,
@@ -293,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_notifications_when_plugin_enabled() {
-        let app = app_with_plugins(HashMap::new()).await;
+        let (app, _events) = app_with_plugins(HashMap::new()).await;
         let device_id = "b".repeat(32);
         let packet = NetworkPacket::new(
             NOTIFICATION_PACKET,
@@ -302,5 +338,109 @@ mod tests {
 
         assert!(handle_packet(&app, Some(&device_id), &packet).await);
         assert_eq!(app.notifications.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn eviction_emits_a_dismissal_for_the_oldest() {
+        let (app, mut events) = app_with_plugins(HashMap::new()).await;
+        let device_id = "b".repeat(32);
+        for i in 0..MAX_PER_DEVICE {
+            assert!(
+                handle_packet(
+                    &app,
+                    Some(&device_id),
+                    &notification_packet(&format!("n{i}"), i as i64)
+                )
+                .await
+            );
+        }
+        // Drain the events of the initial batch.
+        while events.try_recv().is_ok() {}
+
+        assert!(
+            handle_packet(
+                &app,
+                Some(&device_id),
+                &notification_packet("newest", MAX_PER_DEVICE as i64),
+            )
+            .await
+        );
+
+        let mut dismissed = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let Event::NotificationDismissed { id, .. } = event {
+                dismissed.push(id);
+            }
+        }
+        assert_eq!(dismissed, vec!["n0".to_owned()]);
+        let list = app.notifications.list().await;
+        assert_eq!(list.len(), MAX_PER_DEVICE);
+        assert!(list.iter().all(|(_, n)| n.id != "n0"));
+        assert!(list.iter().any(|(_, n)| n.id == "newest"));
+    }
+
+    #[tokio::test]
+    async fn eviction_never_drops_the_entry_just_inserted() {
+        let (app, _events) = app_with_plugins(HashMap::new()).await;
+        let device_id = "b".repeat(32);
+        for i in 0..MAX_PER_DEVICE {
+            assert!(
+                handle_packet(
+                    &app,
+                    Some(&device_id),
+                    &notification_packet(&format!("n{i}"), i as i64)
+                )
+                .await
+            );
+        }
+
+        // Re-posted with an old timestamp: it must stay and evict the next
+        // oldest entry instead.
+        assert!(handle_packet(&app, Some(&device_id), &notification_packet("old", -1)).await);
+        let list = app.notifications.list().await;
+        assert_eq!(list.len(), MAX_PER_DEVICE);
+        assert!(list.iter().any(|(_, n)| n.id == "old"));
+        assert!(list.iter().all(|(_, n)| n.id != "n0"));
+    }
+
+    #[tokio::test]
+    async fn dismissal_for_an_unknown_notification_is_forwarded() {
+        let (app, mut events) = app_with_plugins(HashMap::new()).await;
+        let device_id = "b".repeat(32);
+        let packet = NetworkPacket::new(
+            NOTIFICATION_PACKET,
+            serde_json::json!({ "id": "ghost", "isCancel": true }),
+        );
+
+        assert!(handle_packet(&app, Some(&device_id), &packet).await);
+        match events.try_recv().expect("dismissal event") {
+            Event::NotificationDismissed {
+                device_id: id,
+                id: notification,
+            } => {
+                assert_eq!(id, device_id);
+                assert_eq!(notification, "ghost");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(app.notifications.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_orders_equal_times_by_id() {
+        let (app, _events) = app_with_plugins(HashMap::new()).await;
+        let device_id = "b".repeat(32);
+        for id in ["c", "a", "b"] {
+            assert!(handle_packet(&app, Some(&device_id), &notification_packet(id, 0)).await);
+        }
+
+        let ids: Vec<String> = app
+            .notifications
+            .list()
+            .await
+            .into_iter()
+            .map(|(_, notification)| notification.id)
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
     }
 }

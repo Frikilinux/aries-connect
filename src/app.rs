@@ -75,6 +75,8 @@ pub enum UiCommand {
     DismissNotification {
         device_id: String,
         notification_id: String,
+        /// Result of the dismissal, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), DismissError>>,
     },
     Ping {
         device_id: String,
@@ -130,6 +132,30 @@ impl std::fmt::Display for PingError {
 }
 
 impl std::error::Error for PingError {}
+
+/// Why a notification dismissal was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DismissError {
+    /// The device is unknown or not paired.
+    NotPaired,
+    /// The notification is not in the active set.
+    UnknownNotification,
+    /// The `kdeconnect.notification` plugin is disabled for the device.
+    PluginDisabled,
+}
+
+impl std::fmt::Display for DismissError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::NotPaired => "device is not paired",
+            Self::UnknownNotification => "notification is not active",
+            Self::PluginDisabled => "kdeconnect.notification is disabled for this device",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for DismissError {}
 
 /// Why a plugin toggle was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,9 +390,17 @@ impl App {
     }
 
     /// Dismisses a notification locally and asks the phone to do the same.
-    /// Returns false when the notification is unknown or the notifications
-    /// plugin is disabled for that device.
-    pub async fn dismiss_notification(&self, device_id: &str, notification_id: &str) -> bool {
+    /// Fails when the device is not paired, the notification is unknown or the
+    /// notifications plugin is disabled for that device.
+    pub async fn dismiss_notification(
+        &self,
+        device_id: &str,
+        notification_id: &str,
+    ) -> Result<(), DismissError> {
+        if self.trusted.get(device_id).await.is_none() {
+            tracing::debug!(device = %device_id, "cannot dismiss for an unpaired device");
+            return Err(DismissError::NotPaired);
+        }
         if !self
             .trusted
             .plugin_enabled(device_id, notifications::NOTIFICATION_PACKET)
@@ -376,7 +410,7 @@ impl App {
                 device = %device_id,
                 "notifications plugin is disabled for this device"
             );
-            return false;
+            return Err(DismissError::PluginDisabled);
         }
         if self
             .notifications
@@ -384,7 +418,7 @@ impl App {
             .await
             .is_none()
         {
-            return false;
+            return Err(DismissError::UnknownNotification);
         }
         let _ = self.events.send(Event::NotificationDismissed {
             device_id: device_id.to_owned(),
@@ -399,7 +433,7 @@ impl App {
                 "no active control channel to forward the dismissal"
             );
         }
-        true
+        Ok(())
     }
 
     /// Sends a ping to a device. Fails when the device is not paired, the
@@ -603,19 +637,23 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
             UiCommand::DismissNotification {
                 device_id,
                 notification_id,
+                reply,
             } => {
                 tracing::debug!(
                     device = %device_id,
                     notification = %notification_id,
                     "dismiss_notification"
                 );
-                if !app.dismiss_notification(&device_id, &notification_id).await {
+                let result = app.dismiss_notification(&device_id, &notification_id).await;
+                if let Err(e) = &result {
                     tracing::warn!(
                         device = %device_id,
                         notification = %notification_id,
-                        "unknown notification"
+                        error = %e,
+                        "cannot dismiss notification"
                     );
                 }
+                let _ = reply.send(result);
             }
             UiCommand::Ping {
                 device_id,
@@ -844,6 +882,28 @@ mod tests {
         assert_eq!(
             app.battery.get(&device_id).await,
             battery::BatteryStatus::UNKNOWN
+        );
+    }
+
+    #[tokio::test]
+    async fn dismiss_notification_reports_missing_and_disabled() {
+        let (app, device_id, _events) = app_with_phone().await;
+        assert_eq!(
+            app.dismiss_notification(&device_id, "ghost").await,
+            Err(DismissError::UnknownNotification)
+        );
+
+        app.trusted
+            .set_plugin_enabled(&device_id, notifications::NOTIFICATION_PACKET, false)
+            .await;
+        assert_eq!(
+            app.dismiss_notification(&device_id, "ghost").await,
+            Err(DismissError::PluginDisabled)
+        );
+
+        assert_eq!(
+            app.dismiss_notification(&"c".repeat(32), "ghost").await,
+            Err(DismissError::NotPaired)
         );
     }
 

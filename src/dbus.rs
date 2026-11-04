@@ -264,13 +264,21 @@ impl DeviceIface {
         self.send_clipboard_cmd(text, Some(timestamp)).await
     }
 
-    /// Dismiss a notification locally and ask the phone to do the same.
+    /// Dismiss a notification locally and ask the phone to do the same. Fails
+    /// when the device is not paired, the notification is not active or the
+    /// notifications plugin is disabled for the device.
     async fn dismiss_notification(&self, notification_id: String) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
         self.cmd_tx
             .send(UiCommand::DismissNotification {
                 device_id: self.device_id.clone(),
                 notification_id,
+                reply,
             })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
@@ -784,5 +792,45 @@ mod tests {
             _ => panic!("unexpected command"),
         }
         task.await.expect("join").expect("d-bus result");
+    }
+
+    #[tokio::test]
+    async fn dismiss_notification_reports_the_daemon_result() {
+        use tokio::sync::mpsc;
+
+        use crate::app::{App, DismissError};
+        use crate::identity::LocalIdentity;
+        use crate::trusted::TrustedStore;
+
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let device_id = "b".repeat(32);
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let iface = DeviceIface {
+            app,
+            cmd_tx,
+            device_id: device_id.clone(),
+        };
+
+        let task =
+            tokio::spawn(async move { iface.dismiss_notification("ghost".to_owned()).await });
+        match cmd_rx.recv().await.expect("dismiss command") {
+            UiCommand::DismissNotification {
+                device_id: id,
+                notification_id,
+                reply,
+            } => {
+                assert_eq!(id, device_id);
+                assert_eq!(notification_id, "ghost");
+                let _ = reply.send(Err(DismissError::UnknownNotification));
+            }
+            _ => panic!("unexpected command"),
+        }
+        let error = task.await.expect("join").expect_err("d-bus error");
+        assert!(
+            error.to_string().contains("notification is not active"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -60,7 +60,11 @@ another one with `isCancel: true` when it is dismissed.
 
 Relevant body fields: `id` (string or number), `appName`, `title`, `text`,
 `time` (milliseconds) and `isCancel`. The daemon stores up to 100 entries per
-device and drops the oldest first.
+device and drops the oldest first, announcing the eviction with
+`NotificationDismissed` so clients that mirror the set stay in sync. A
+cancellation for an id the daemon does not know is still forwarded as
+`NotificationDismissed`, which lets a client drop an entry it learned about
+before the daemon evicted or restarted.
 
 Dismissing from the desktop sends `kdeconnect.notification.request` with
 `{"cancel": "<id>"}`. The local mirror is removed immediately; the phone may

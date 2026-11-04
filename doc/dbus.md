@@ -82,7 +82,7 @@ implements; plugins absent from `devices/<id>/device.json` count as enabled.
 | `Ping(message)` | `s` | Pings the device; the message may be empty. Fails if it cannot be delivered |
 | `SendClipboard(text)` | `s` | Sends the local clipboard as `kdeconnect.clipboard`. Empty text is ignored; fails for unpaired/disabled/offline devices or text over 1 MiB |
 | `SendClipboardConnect(text, timestamp)` | `sx` | Sends `kdeconnect.clipboard.connect` with the clipboard timestamp |
-| `DismissNotification(notificationId)` | `s` | Dismisses a notification locally and on the phone |
+| `DismissNotification(notificationId)` | `s` | Dismisses a notification locally and on the phone; fails for unpaired devices, inactive notifications or a disabled plugin |
 | `SetPluginEnabled(plugin, enabled)` | `sb` | Enables or disables a plugin; fails for unsupported plugins |
 
 ### Signals
@@ -224,6 +224,13 @@ Notifications are kept in memory across reconnects (Android replaces its socket
 frequently); they are cleared when the device is unpaired or when its
 notifications plugin is disabled. Clients should refresh `ActiveNotifications()`
 when they receive `PropertiesChanged` for `Plugins`.
+
+The daemon keeps at most 100 notifications per device and drops the oldest one
+when the limit is reached, emitting `NotificationDismissed` for the evicted id.
+A `kdeconnect.notification` cancellation also emits `NotificationDismissed` for
+unknown ids, so a client that still mirrors an entry can always drop it.
+`DismissNotification(id)` fails when the device is not paired, the notification
+is not active or the notifications plugin is disabled.
 
 ## Plugins
 
