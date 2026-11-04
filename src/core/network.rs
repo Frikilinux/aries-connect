@@ -391,6 +391,9 @@ async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket
         "kdeconnect.battery" => {
             crate::plugins::battery::handle_packet(app, peer_id.as_deref(), &packet).await;
         }
+        "kdeconnect.clipboard" | "kdeconnect.clipboard.connect" => {
+            crate::plugins::clipboard::handle_packet(app, peer_id.as_deref(), &packet).await;
+        }
         "kdeconnect.notification" => {
             crate::plugins::notifications::handle_packet(app, peer_id.as_deref(), &packet).await;
         }

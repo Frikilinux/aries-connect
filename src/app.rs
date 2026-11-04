@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::identity::{pair_packet, IdentityBody, LocalIdentity, NetworkPacket};
 use crate::plugins::battery::{self, BatteryStore};
+use crate::plugins::clipboard::{self, ClipboardError};
 use crate::plugins::notifications::{self, NotificationStore};
 use crate::plugins::ping;
 use crate::trusted::{TrustedDevice, TrustedStore};
@@ -46,6 +47,13 @@ pub enum Event {
         level: i32,
         charging: bool,
     },
+    /// The device clipboard changed. `timestamp` is `0` for regular updates
+    /// and the connection timestamp for `kdeconnect.clipboard.connect`.
+    ClipboardReceived {
+        device_id: String,
+        content: String,
+        timestamp: i64,
+    },
     /// A per-device plugin was enabled or disabled.
     PluginStateChanged {
         device_id: String,
@@ -73,6 +81,15 @@ pub enum UiCommand {
         message: String,
         /// Result of the delivery attempt, sent back to the D-Bus caller.
         reply: oneshot::Sender<Result<(), PingError>>,
+    },
+    SendClipboard {
+        device_id: String,
+        content: String,
+        /// `None` sends `kdeconnect.clipboard`; `Some(timestamp)` sends
+        /// `kdeconnect.clipboard.connect`.
+        timestamp: Option<i64>,
+        /// Result of the delivery attempt, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), ClipboardError>>,
     },
     SetPluginEnabled {
         device_id: String,
@@ -612,6 +629,29 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                 }
                 let _ = reply.send(result);
             }
+            UiCommand::SendClipboard {
+                device_id,
+                content,
+                timestamp,
+                reply,
+            } => {
+                tracing::info!(
+                    device = %device_id,
+                    bytes = content.len(),
+                    connect = timestamp.is_some(),
+                    "send_clipboard"
+                );
+                let result = match timestamp {
+                    Some(timestamp) => {
+                        clipboard::send_connect(&app, &device_id, &content, timestamp).await
+                    }
+                    None => clipboard::send(&app, &device_id, &content).await,
+                };
+                if let Err(e) = &result {
+                    tracing::warn!(device = %device_id, error = %e, "cannot send clipboard");
+                }
+                let _ = reply.send(result);
+            }
             UiCommand::SetPluginEnabled {
                 device_id,
                 plugin,
@@ -661,6 +701,31 @@ mod tests {
         assert_eq!(
             response.await.expect("reply"),
             Err(PingError::NotPaired),
+            "an unknown device must report the failure to the D-Bus caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn clipboard_command_reports_delivery_errors() {
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        tokio::spawn(command_loop(app.clone(), cmd_rx));
+
+        let (reply, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::SendClipboard {
+                device_id: "b".repeat(32),
+                content: "hola".to_owned(),
+                timestamp: None,
+                reply,
+            })
+            .expect("command queued");
+
+        assert_eq!(
+            response.await.expect("reply"),
+            Err(ClipboardError::NotPaired),
             "an unknown device must report the failure to the D-Bus caller"
         );
     }

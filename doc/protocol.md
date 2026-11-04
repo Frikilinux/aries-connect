@@ -113,6 +113,37 @@ even when the plugin is disabled for a device, so turning the plugin off on the
 phone is only visible to the daemon through the absence of updates, not through
 a capability change.
 
+## Clipboard
+
+Clipboard sync is bidirectional and text-only. Every change is sent as:
+
+```json
+{ "content": "texto copiado" }
+```
+
+with type `kdeconnect.clipboard`. In addition, when the control channel is
+established each side may send `kdeconnect.clipboard.connect` with the time the
+clipboard was last updated:
+
+```json
+{ "content": "texto copiado", "timestamp": 1700000000000 }
+```
+
+`timestamp` is milliseconds since the epoch, may be a number or a string, and is
+`0` when unknown. The receiver should ignore a `clipboard.connect` whose
+timestamp is `0` or older than its own clipboard timestamp, so the newest
+content wins when both devices connect.
+
+AriesConnect does not touch the local clipboard: it relays both packet types
+over D-Bus and leaves reading/writing to a session client. Empty text is
+ignored, and text over 1 MiB is dropped. Packets are accepted only from
+**paired** devices with the `kdeconnect.clipboard` plugin enabled.
+
+There is no acknowledgement: a sent packet may be ignored by the peer, for
+example when its clipboard plugin is disabled. On Android 10+ the phone cannot
+read the clipboard in the background without extra permissions, so automatic
+phone-to-desktop sync may require the manual “Send clipboard” action.
+
 ## Trust model
 
 - Pairing (`kdeconnect.pair` with `pair: true`) is surfaced to the user as a

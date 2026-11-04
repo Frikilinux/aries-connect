@@ -106,6 +106,7 @@ impl LocalIdentity {
                 .map(|plugin| (*plugin).to_owned()),
         );
         capabilities.push("kdeconnect.notification.request".to_owned());
+        capabilities.push(crate::plugins::clipboard::CLIPBOARD_CONNECT_PACKET.to_owned());
 
         Self {
             device_id,
@@ -184,6 +185,23 @@ mod tests {
                 capabilities.iter().any(|c| c == ping::PING_PACKET),
                 "identity must advertise {}",
                 ping::PING_PACKET
+            );
+        }
+    }
+
+    #[test]
+    fn identity_advertises_clipboard_connect() {
+        let identity = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        for capabilities in [
+            &identity.incoming_capabilities,
+            &identity.outgoing_capabilities,
+        ] {
+            assert!(
+                capabilities
+                    .iter()
+                    .any(|c| c == crate::plugins::clipboard::CLIPBOARD_CONNECT_PACKET),
+                "identity must advertise {}",
+                crate::plugins::clipboard::CLIPBOARD_CONNECT_PACKET
             );
         }
     }
