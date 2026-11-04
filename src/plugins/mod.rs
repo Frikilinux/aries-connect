@@ -2,6 +2,7 @@
 //! own packet types and feeds the shared state.
 
 pub mod battery;
+pub mod clipboard;
 pub mod notifications;
 pub mod ping;
 
@@ -11,6 +12,7 @@ pub mod ping;
 /// object; the identity advertises the same packet types as capabilities.
 pub const SUPPORTED_PLUGINS: &[&str] = &[
     battery::BATTERY_PACKET,
+    clipboard::CLIPBOARD_PACKET,
     notifications::NOTIFICATION_PACKET,
     ping::PING_PACKET,
 ];

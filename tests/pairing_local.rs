@@ -17,6 +17,7 @@ use tokio_rustls::TlsAcceptor;
 use aries_connect::app::{App, Event, PairDecision, PingError};
 use aries_connect::identity::{pair_packet, parse_identity, LocalIdentity, NetworkPacket};
 use aries_connect::plugins::battery::BatteryStatus;
+use aries_connect::plugins::clipboard;
 use aries_connect::tls::IdentityCertificate;
 
 const DAEMON_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -462,6 +463,151 @@ fn battery_packet(level: i64, charging: bool) -> NetworkPacket {
         "kdeconnect.battery",
         serde_json::json!({ "currentCharge": level, "isCharging": charging }),
     )
+}
+
+fn incoming_clipboard(content: &str) -> NetworkPacket {
+    NetworkPacket::new(
+        "kdeconnect.clipboard",
+        serde_json::json!({ "content": content }),
+    )
+}
+
+fn incoming_clipboard_connect(content: &str, timestamp: i64) -> NetworkPacket {
+    NetworkPacket::new(
+        "kdeconnect.clipboard.connect",
+        serde_json::json!({ "content": content, "timestamp": timestamp }),
+    )
+}
+
+#[tokio::test]
+async fn clipboard_flow_works() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+
+    send_packet(&mut reader, &incoming_clipboard("hola desde el móvil")).await;
+    let event = wait_event(&mut events, |e| {
+        matches!(e, Event::ClipboardReceived { .. })
+    })
+    .await;
+    match event {
+        Event::ClipboardReceived {
+            device_id,
+            content,
+            timestamp,
+        } => {
+            assert_eq!(device_id, PHONE_ID);
+            assert_eq!(content, "hola desde el móvil");
+            assert_eq!(timestamp, 0);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn clipboard_connect_flow_works() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+
+    send_packet(
+        &mut reader,
+        &incoming_clipboard_connect("texto con timestamp", 1_700_000_000_000),
+    )
+    .await;
+    let event = wait_event(&mut events, |e| {
+        matches!(e, Event::ClipboardReceived { .. })
+    })
+    .await;
+    match event {
+        Event::ClipboardReceived {
+            content, timestamp, ..
+        } => {
+            assert_eq!(content, "texto con timestamp");
+            assert_eq!(timestamp, 1_700_000_000_000);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn clipboard_from_unpaired_devices_is_ignored() {
+    let (_app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+
+    send_packet(&mut reader, &incoming_clipboard("no debería llegar")).await;
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match events.recv().await {
+                Some(Event::ClipboardReceived { .. }) => return,
+                Some(_) => {}
+                None => return,
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_err(),
+        "unpaired devices must not report clipboard changes"
+    );
+}
+
+#[tokio::test]
+async fn disabled_clipboard_plugin_ignores_updates() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+    app.set_plugin_enabled(PHONE_ID, "kdeconnect.clipboard", false)
+        .await
+        .expect("clipboard plugin toggle");
+
+    send_packet(&mut reader, &incoming_clipboard("no debería llegar")).await;
+    let received = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match events.recv().await {
+                Some(Event::ClipboardReceived { .. }) => return,
+                Some(_) => {}
+                None => return,
+            }
+        }
+    })
+    .await;
+    assert!(
+        received.is_err(),
+        "disabled plugin must drop incoming clipboard updates"
+    );
+}
+
+#[tokio::test]
+async fn daemon_sends_clipboard_packets() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+
+    clipboard::send(&app, PHONE_ID, "desde el pc")
+        .await
+        .expect("clipboard sent");
+    let packet = read_packet(&mut reader).await;
+    assert_eq!(packet.packet_type, "kdeconnect.clipboard");
+    assert_eq!(
+        packet.body.get("content").and_then(|v| v.as_str()),
+        Some("desde el pc")
+    );
+
+    clipboard::send_connect(&app, PHONE_ID, "con timestamp", 42)
+        .await
+        .expect("clipboard.connect sent");
+    let packet = read_packet(&mut reader).await;
+    assert_eq!(packet.packet_type, "kdeconnect.clipboard.connect");
+    assert_eq!(
+        packet.body.get("timestamp").and_then(|v| v.as_i64()),
+        Some(42)
+    );
 }
 
 #[tokio::test]

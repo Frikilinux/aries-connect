@@ -80,6 +80,8 @@ implements; plugins absent from `devices/<id>/device.json` count as enabled.
 | --- | --- | --- |
 | `Unpair()` | `-` | Forgets the pairing and notifies the phone when connected |
 | `Ping(message)` | `s` | Pings the device; the message may be empty. Fails if it cannot be delivered |
+| `SendClipboard(text)` | `s` | Sends the local clipboard as `kdeconnect.clipboard`. Empty text is ignored; fails for unpaired/disabled/offline devices or text over 1 MiB |
+| `SendClipboardConnect(text, timestamp)` | `sx` | Sends `kdeconnect.clipboard.connect` with the clipboard timestamp |
 | `DismissNotification(notificationId)` | `s` | Dismisses a notification locally and on the phone |
 | `SetPluginEnabled(plugin, enabled)` | `sb` | Enables or disables a plugin; fails for unsupported plugins |
 
@@ -88,6 +90,7 @@ implements; plugins absent from `devices/<id>/device.json` count as enabled.
 | Signal | Payload | Meaning |
 | --- | --- | --- |
 | `PingReceived` | `(message)` | The device pinged us (the message may be empty) |
+| `ClipboardReceived` | `(content, timestamp)` | The device clipboard changed; `timestamp` is `0` for regular updates and the connection timestamp for `clipboard.connect` |
 | `NotificationReceived` | `(id, appName, title, text)` | The phone posted a notification |
 | `NotificationDismissed` | `(id)` | A notification was dismissed, locally or on the phone |
 
@@ -172,6 +175,44 @@ keepalive: the daemon probes the control channel after 15 s of inactivity and
 gives up after three unanswered probes, so `Connected` flips to `false` and the
 battery status is cleared within roughly 30 s.
 
+## Clipboard
+
+Clipboard sync is bidirectional and text-only. The daemon **does not read or
+write the local clipboard**: it relays packets between the phone and a client
+on the session bus, which owns the clipboard through the compositor. This keeps
+the daemon headless and portable across Wayland and X11.
+
+- `SendClipboard(text)` sends `kdeconnect.clipboard`; it fails when the device
+  is not paired, the plugin is disabled, there is no control channel or the
+  text exceeds 1 MiB. Empty text is ignored.
+- `SendClipboardConnect(text, timestamp)` sends `kdeconnect.clipboard.connect`
+  with the local clipboard timestamp in milliseconds. Empty text or a
+  timestamp `<= 0` is ignored.
+- `ClipboardReceived(content, timestamp)` is emitted for every accepted
+  packet. `timestamp` is `0` for regular updates; for `clipboard.connect` it is
+  the phone timestamp, and the client should apply the content only when it is
+  newer than its own clipboard timestamp.
+
+`SendClipboard` success only means the packet was written to the control
+channel: there is no acknowledgement, so the phone may still ignore it (for
+example when its clipboard plugin is disabled).
+
+The client is responsible for:
+
+1. Watching the local clipboard and calling `SendClipboard` when the text
+   changes.
+2. Writing `ClipboardReceived` content to the local clipboard, updating its
+   “last applied” marker **before** writing so its own watcher event is
+   ignored.
+3. Calling `SendClipboardConnect` when a device becomes `Connected`, if it
+   wants to seed the phone with the current clipboard and let the timestamps
+   decide which side is newer.
+
+On Android 10+ the phone cannot read the clipboard in the background without
+special permissions, so automatic phone-to-desktop sync may require the
+“Send clipboard” action in the KDE Connect app; desktop-to-phone sync works
+normally.
+
 ## Notifications
 
 `ActiveNotifications()` on the service object aggregates the notifications of
@@ -252,6 +293,11 @@ busctl --user call dev.zotta.AriesConnect \
 # read the last reported battery state
 busctl --user get-property dev.zotta.AriesConnect \
   /dev/zotta/AriesConnect/Device/<id> dev.zotta.AriesConnect.Device BatteryLevel
+
+# send text to the phone clipboard
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device SendClipboard s "texto para el móvil"
 
 # toggle the ping plugin of a device
 busctl --user call dev.zotta.AriesConnect \

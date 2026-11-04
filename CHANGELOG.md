@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   properties on the device object, updated from the status packets pushed by
   the phone, announced with `PropertiesChanged` and cleared when the control
   channel closes.
+- Clipboard plugin (`kdeconnect.clipboard`): `SendClipboard`,
+  `SendClipboardConnect` and the `ClipboardReceived` signal; the daemon relays
+  text and leaves the local clipboard to a session client.
 
 ### Fixed
 

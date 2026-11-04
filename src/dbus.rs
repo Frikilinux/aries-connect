@@ -116,6 +116,30 @@ impl DeviceIface {
     async fn device(&self) -> Option<Device> {
         self.app.registry.get(&self.device_id).await
     }
+
+    /// Queues a clipboard send and waits for its result.
+    ///
+    /// `timestamp: None` sends `kdeconnect.clipboard`; `Some(timestamp)` sends
+    /// `kdeconnect.clipboard.connect`.
+    async fn send_clipboard_cmd(
+        &self,
+        content: String,
+        timestamp: Option<i64>,
+    ) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(UiCommand::SendClipboard {
+                device_id: self.device_id.clone(),
+                content,
+                timestamp,
+                reply,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
 }
 
 #[zbus::interface(name = "dev.zotta.AriesConnect.Device")]
@@ -226,6 +250,20 @@ impl DeviceIface {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
+    /// Send the local clipboard to the device. Empty text is ignored. Fails
+    /// when the device is not paired, the plugin is disabled, it is not
+    /// connected or the text exceeds 1 MiB.
+    async fn send_clipboard(&self, text: String) -> zbus::fdo::Result<()> {
+        self.send_clipboard_cmd(text, None).await
+    }
+
+    /// Send the local clipboard with its timestamp as the connection-time
+    /// packet (`kdeconnect.clipboard.connect`). Empty text or a timestamp
+    /// `<= 0` is ignored.
+    async fn send_clipboard_connect(&self, text: String, timestamp: i64) -> zbus::fdo::Result<()> {
+        self.send_clipboard_cmd(text, Some(timestamp)).await
+    }
+
     /// Dismiss a notification locally and ask the phone to do the same.
     async fn dismiss_notification(&self, notification_id: String) -> zbus::fdo::Result<()> {
         self.cmd_tx
@@ -258,6 +296,15 @@ impl DeviceIface {
     /// A paired device pinged us. The optional message may be empty.
     #[zbus(signal)]
     async fn ping_received(emitter: &SignalEmitter<'_>, message: String) -> zbus::Result<()>;
+
+    /// The device clipboard changed. `timestamp` is `0` for regular updates
+    /// and the connection timestamp for `kdeconnect.clipboard.connect`.
+    #[zbus(signal)]
+    async fn clipboard_received(
+        emitter: &SignalEmitter<'_>,
+        content: String,
+        timestamp: i64,
+    ) -> zbus::Result<()>;
 
     /// The phone posted a notification.
     #[zbus(signal)]
@@ -526,6 +573,19 @@ async fn event_loop(
                     tracing::warn!(device = %device_id, error = %e, "failed to emit PingReceived");
                 }
             }
+            Event::ClipboardReceived {
+                device_id,
+                content,
+                timestamp,
+            } => {
+                let Some(emitter) = device_emitter(&conn, &device_id) else {
+                    continue;
+                };
+                if let Err(e) = DeviceIface::clipboard_received(&emitter, content, timestamp).await
+                {
+                    tracing::warn!(device = %device_id, error = %e, "failed to emit ClipboardReceived");
+                }
+            }
         }
     }
 }
@@ -608,6 +668,7 @@ mod tests {
         assert_eq!(plugins.get("kdeconnect.ping"), Some(&false));
         assert_eq!(plugins.get("kdeconnect.notification"), Some(&true));
         assert_eq!(plugins.get("kdeconnect.battery"), Some(&true));
+        assert_eq!(plugins.get("kdeconnect.clipboard"), Some(&true));
     }
 
     async fn device_iface(plugins: HashMap<String, bool>) -> DeviceIface {
@@ -683,5 +744,45 @@ mod tests {
 
         assert_eq!(iface.battery_level().await, -1);
         assert!(!iface.is_charging().await);
+    }
+
+    #[tokio::test]
+    async fn send_clipboard_connect_forwards_the_timestamp() {
+        use tokio::sync::mpsc;
+
+        use crate::app::App;
+        use crate::identity::LocalIdentity;
+        use crate::trusted::TrustedStore;
+
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let device_id = "b".repeat(32);
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let iface = DeviceIface {
+            app,
+            cmd_tx,
+            device_id: device_id.clone(),
+        };
+
+        let task =
+            tokio::spawn(
+                async move { iface.send_clipboard_connect("hola".to_owned(), 1234).await },
+            );
+        match cmd_rx.recv().await.expect("clipboard command") {
+            UiCommand::SendClipboard {
+                device_id: id,
+                content,
+                timestamp,
+                reply,
+            } => {
+                assert_eq!(id, device_id);
+                assert_eq!(content, "hola");
+                assert_eq!(timestamp, Some(1234));
+                let _ = reply.send(Ok(()));
+            }
+            _ => panic!("unexpected command"),
+        }
+        task.await.expect("join").expect("d-bus result");
     }
 }

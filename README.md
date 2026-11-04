@@ -20,7 +20,7 @@ control channel and exposes devices, pairing and events over D-Bus
 - [x] Notifications (`kdeconnect.notification`)
 - [x] Ping (`kdeconnect.ping`)
 - [x] Battery (`kdeconnect.battery`)
-- [ ] Clipboard (`kdeconnect.clipboard`)
+- [x] Clipboard (`kdeconnect.clipboard`)
 
 ## Requirements
 
