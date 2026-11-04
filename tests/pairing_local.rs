@@ -715,3 +715,24 @@ async fn disconnect_clears_battery_status() {
         "the last battery status must not survive a disconnect"
     );
 }
+
+#[tokio::test]
+async fn unpaired_peer_is_told_to_unpair() {
+    let (_app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+
+    // The phone still believes it is paired (the desktop unpaired while it was
+    // offline), so it pushes a status packet after reconnecting.
+    send_packet(&mut reader, &battery_packet(50, false)).await;
+
+    let packet = tokio::time::timeout(Duration::from_secs(5), read_packet(&mut reader))
+        .await
+        .expect("unpair packet");
+    assert_eq!(packet.packet_type, "kdeconnect.pair");
+    assert_eq!(
+        packet.body.get("pair").and_then(|v| v.as_bool()),
+        Some(false),
+        "an unpaired peer that still sends plugin packets must be told to unpair"
+    );
+}

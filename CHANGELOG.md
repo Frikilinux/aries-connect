@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order the notification snapshot deterministically, and make
   `DismissNotification` fail when the device is unpaired, the notification is
   inactive or the plugin is disabled.
+- Tell a device that reconnects after an offline unpair to forget the stale
+  pairing: when an untrusted peer sends a plugin packet, reply with
+  `kdeconnect.pair: false`.
 
 ## [0.3.0] - 2026-11-02
 

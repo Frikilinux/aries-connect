@@ -371,6 +371,21 @@ fn parse_json(bytes: &[u8], what: &str) -> io::Result<NetworkPacket> {
 
 /// Routes one packet to its handler.
 async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket) {
+    // A peer that is not in the trust store but keeps sending plugin packets
+    // still believes it is paired: this happens when the desktop unpairs while
+    // the phone is offline, so the `pair: false` notification was lost. Tell
+    // it to forget the pairing, like kdeconnect-kde does. Pair and identity
+    // packets are handled below.
+    if packet.packet_type != "kdeconnect.identity" && packet.packet_type != "kdeconnect.pair" {
+        if let Some(id) = peer_id.as_deref() {
+            if app.trusted.get(id).await.is_none() {
+                tracing::info!(device = %id, "unpaired peer sent a packet, sending unpair");
+                app.unpair(id, true).await;
+                return;
+            }
+        }
+    }
+
     match packet.packet_type.as_str() {
         "kdeconnect.identity" => {
             // Late identity updates (e.g. device rename) are accepted.

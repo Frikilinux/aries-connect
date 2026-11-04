@@ -155,7 +155,10 @@ phone-to-desktop sync may require the manual “Send clipboard” action.
   requests expire after 30 s and are rejected.
 - `pair: false` from a peer unpairs the device.
 - Unpairing from the desktop sends `pair: false` to the peer before forgetting
-  the device, so both sides drop the pairing.
+  the device, so both sides drop the pairing. If the peer is offline at that
+  moment the packet is lost, so an untrusted device that later reconnects and
+  sends any plugin packet is answered with `pair: false`: the phone then drops
+  its stale pairing instead of showing the desktop as paired forever.
 - On acceptance the peer id, name and certificate SHA-256 fingerprint are stored
   in the device's `devices/<id>/device.json`.
 - Reconnecting paired devices must present the same certificate; a mismatch is
