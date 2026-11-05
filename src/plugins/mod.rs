@@ -3,6 +3,7 @@
 
 pub mod battery;
 pub mod clipboard;
+pub mod connectivity_report;
 pub mod notifications;
 pub mod ping;
 
@@ -13,6 +14,7 @@ pub mod ping;
 pub const SUPPORTED_PLUGINS: &[&str] = &[
     battery::BATTERY_PACKET,
     clipboard::CLIPBOARD_PACKET,
+    connectivity_report::CONNECTIVITY_REPORT_PACKET,
     notifications::NOTIFICATION_PACKET,
     ping::PING_PACKET,
 ];

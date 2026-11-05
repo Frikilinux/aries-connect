@@ -17,7 +17,7 @@ use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedObjectPath;
 
 use crate::app::{App, Device, Event, UiCommand};
-use crate::plugins::battery;
+use crate::plugins::{battery, connectivity_report};
 
 pub const DBUS_NAME: &str = "dev.zotta.AriesConnect";
 pub const DBUS_PATH: &str = "/dev/zotta/AriesConnect";
@@ -225,6 +225,32 @@ impl DeviceIface {
         self.app.battery.get(&self.device_id).await.charging
     }
 
+    /// Coarse signal strength of each subscription (SIM), keyed by
+    /// subscription id. Each value is `(networkType, signalStrength)` with a
+    /// level in `0..=4`. Empty when unknown, disconnected or the
+    /// `kdeconnect.connectivity_report` plugin is disabled.
+    #[zbus(property)]
+    async fn signal_strengths(&self) -> HashMap<String, (String, i32)> {
+        if !self
+            .app
+            .trusted
+            .plugin_enabled(
+                &self.device_id,
+                connectivity_report::CONNECTIVITY_REPORT_PACKET,
+            )
+            .await
+        {
+            return HashMap::new();
+        }
+        self.app
+            .connectivity
+            .get(&self.device_id)
+            .await
+            .into_iter()
+            .map(|(id, state)| (id, (state.network_type, state.signal_strength)))
+            .collect()
+    }
+
     /// Forget the pairing, notifying the peer when it is connected.
     async fn unpair(&self) -> zbus::fdo::Result<()> {
         self.cmd_tx
@@ -424,6 +450,7 @@ enum DeviceProperty {
     Plugins,
     BatteryLevel,
     IsCharging,
+    SignalStrengths,
 }
 
 /// Emits `PropertiesChanged` for one device property, reading the new value
@@ -456,6 +483,7 @@ async fn emit_property_changed(conn: &zbus::Connection, device_id: &str, propert
         DeviceProperty::Plugins => iface.plugins_changed(emitter).await,
         DeviceProperty::BatteryLevel => iface.battery_level_changed(emitter).await,
         DeviceProperty::IsCharging => iface.is_charging_changed(emitter).await,
+        DeviceProperty::SignalStrengths => iface.signal_strengths_changed(emitter).await,
     };
     if let Err(e) = result {
         tracing::warn!(
@@ -517,6 +545,7 @@ async fn event_loop(
                 emit_property_changed(&conn, &id, DeviceProperty::Connected).await;
                 emit_property_changed(&conn, &id, DeviceProperty::BatteryLevel).await;
                 emit_property_changed(&conn, &id, DeviceProperty::IsCharging).await;
+                emit_property_changed(&conn, &id, DeviceProperty::SignalStrengths).await;
             }
             Event::PairingRequested { id, name } => {
                 if let Err(e) = AriesConnectIface::pairing_requested(&service, id, name).await {
@@ -535,6 +564,7 @@ async fn event_loop(
                 emit_property_changed(&conn, &id, DeviceProperty::Paired).await;
                 emit_property_changed(&conn, &id, DeviceProperty::BatteryLevel).await;
                 emit_property_changed(&conn, &id, DeviceProperty::IsCharging).await;
+                emit_property_changed(&conn, &id, DeviceProperty::SignalStrengths).await;
             }
             Event::PluginStateChanged {
                 device_id, plugin, ..
@@ -544,10 +574,16 @@ async fn event_loop(
                     emit_property_changed(&conn, &device_id, DeviceProperty::BatteryLevel).await;
                     emit_property_changed(&conn, &device_id, DeviceProperty::IsCharging).await;
                 }
+                if plugin == connectivity_report::CONNECTIVITY_REPORT_PACKET {
+                    emit_property_changed(&conn, &device_id, DeviceProperty::SignalStrengths).await;
+                }
             }
             Event::BatteryChanged { device_id, .. } => {
                 emit_property_changed(&conn, &device_id, DeviceProperty::BatteryLevel).await;
                 emit_property_changed(&conn, &device_id, DeviceProperty::IsCharging).await;
+            }
+            Event::ConnectivityChanged { device_id } => {
+                emit_property_changed(&conn, &device_id, DeviceProperty::SignalStrengths).await;
             }
             Event::NotificationReceived {
                 device_id,
@@ -600,7 +636,17 @@ async fn event_loop(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+
+    #[test]
+    fn signal_strengths_use_the_documented_dbus_signature() {
+        assert_eq!(
+            <HashMap<String, (String, i32)> as zbus::zvariant::Type>::SIGNATURE,
+            "a{s(si)}"
+        );
+    }
 
     #[test]
     fn device_path_sanitizes_hyphens() {
@@ -677,6 +723,7 @@ mod tests {
         assert_eq!(plugins.get("kdeconnect.notification"), Some(&true));
         assert_eq!(plugins.get("kdeconnect.battery"), Some(&true));
         assert_eq!(plugins.get("kdeconnect.clipboard"), Some(&true));
+        assert_eq!(plugins.get("kdeconnect.connectivity_report"), Some(&true));
     }
 
     async fn device_iface(plugins: HashMap<String, bool>) -> DeviceIface {
@@ -752,6 +799,70 @@ mod tests {
 
         assert_eq!(iface.battery_level().await, -1);
         assert!(!iface.is_charging().await);
+    }
+
+    #[tokio::test]
+    async fn signal_strengths_default_to_empty() {
+        let iface = device_iface(HashMap::new()).await;
+
+        assert!(iface.signal_strengths().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn signal_strengths_report_the_last_map() {
+        let iface = device_iface(HashMap::new()).await;
+        iface
+            .app
+            .connectivity
+            .upsert(
+                &iface.device_id,
+                BTreeMap::from([
+                    (
+                        "6".to_owned(),
+                        connectivity_report::SignalState {
+                            network_type: "LTE".to_owned(),
+                            signal_strength: 3,
+                        },
+                    ),
+                    (
+                        "17".to_owned(),
+                        connectivity_report::SignalState {
+                            network_type: "HSPA".to_owned(),
+                            signal_strength: 0,
+                        },
+                    ),
+                ]),
+            )
+            .await;
+
+        let strengths = iface.signal_strengths().await;
+        assert_eq!(strengths.get("6"), Some(&("LTE".to_owned(), 3)));
+        assert_eq!(strengths.get("17"), Some(&("HSPA".to_owned(), 0)));
+    }
+
+    #[tokio::test]
+    async fn signal_strengths_hide_map_when_plugin_disabled() {
+        let plugins = HashMap::from([(
+            connectivity_report::CONNECTIVITY_REPORT_PACKET.to_owned(),
+            false,
+        )]);
+        let iface = device_iface(plugins).await;
+        iface
+            .app
+            .connectivity
+            .upsert(
+                &iface.device_id,
+                BTreeMap::from([(
+                    "6".to_owned(),
+                    connectivity_report::SignalState {
+                        network_type: "LTE".to_owned(),
+                        signal_strength: 3,
+                    },
+                )]),
+            )
+            .await;
+
+        assert!(iface.signal_strengths().await.is_empty());
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ use aries_connect::app::{App, Event, PairDecision, PingError};
 use aries_connect::identity::{pair_packet, parse_identity, LocalIdentity, NetworkPacket};
 use aries_connect::plugins::battery::BatteryStatus;
 use aries_connect::plugins::clipboard;
+use aries_connect::plugins::connectivity_report::{SignalState, CONNECTIVITY_REPORT_PACKET};
 use aries_connect::tls::IdentityCertificate;
 
 const DAEMON_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -688,6 +689,83 @@ async fn disabled_battery_plugin_ignores_updates() {
         "disabled plugin must drop incoming battery updates"
     );
     assert_eq!(app.battery.get(PHONE_ID).await, BatteryStatus::UNKNOWN);
+}
+
+fn connectivity_packet(signals: serde_json::Value) -> NetworkPacket {
+    NetworkPacket::new(
+        CONNECTIVITY_REPORT_PACKET,
+        serde_json::json!({ "signalStrengths": signals }),
+    )
+}
+
+#[tokio::test]
+async fn connectivity_report_flow_works() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+
+    send_packet(
+        &mut reader,
+        &connectivity_packet(serde_json::json!({
+            "6": { "networkType": "LTE", "signalStrength": 3 },
+            "17": { "networkType": "HSPA", "signalStrength": 0 },
+        })),
+    )
+    .await;
+
+    let event = wait_event(&mut events, |e| {
+        matches!(e, Event::ConnectivityChanged { .. })
+    })
+    .await;
+    match event {
+        Event::ConnectivityChanged { device_id } => assert_eq!(device_id, PHONE_ID),
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let report = app.connectivity.get(PHONE_ID).await;
+    assert_eq!(
+        report.get("6"),
+        Some(&SignalState {
+            network_type: "LTE".to_owned(),
+            signal_strength: 3,
+        })
+    );
+    assert_eq!(
+        report.get("17"),
+        Some(&SignalState {
+            network_type: "HSPA".to_owned(),
+            signal_strength: 0,
+        })
+    );
+}
+
+#[tokio::test]
+async fn disconnect_clears_connectivity_report() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+
+    send_packet(
+        &mut reader,
+        &connectivity_packet(serde_json::json!({
+            "6": { "networkType": "LTE", "signalStrength": 3 },
+        })),
+    )
+    .await;
+    wait_event(&mut events, |e| {
+        matches!(e, Event::ConnectivityChanged { .. })
+    })
+    .await;
+    assert!(!app.connectivity.get(PHONE_ID).await.is_empty());
+
+    drop(reader);
+    wait_event(&mut events, |e| matches!(e, Event::Disconnected { .. })).await;
+    assert!(
+        app.connectivity.get(PHONE_ID).await.is_empty(),
+        "the last connectivity report must not survive a disconnect"
+    );
 }
 
 #[tokio::test]

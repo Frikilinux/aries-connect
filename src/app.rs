@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use crate::identity::{pair_packet, IdentityBody, LocalIdentity, NetworkPacket};
 use crate::plugins::battery::{self, BatteryStore};
 use crate::plugins::clipboard::{self, ClipboardError};
+use crate::plugins::connectivity_report::{self, ConnectivityStore};
 use crate::plugins::notifications::{self, NotificationStore};
 use crate::plugins::ping;
 use crate::trusted::{TrustedDevice, TrustedStore};
@@ -47,6 +48,8 @@ pub enum Event {
         level: i32,
         charging: bool,
     },
+    /// The connectivity report of a device changed.
+    ConnectivityChanged { device_id: String },
     /// The device clipboard changed. `timestamp` is `0` for regular updates
     /// and the connection timestamp for `kdeconnect.clipboard.connect`.
     ClipboardReceived {
@@ -309,6 +312,8 @@ pub struct App {
     pub notifications: NotificationStore,
     /// Last reported battery status of each device.
     pub battery: BatteryStore,
+    /// Last reported connectivity report of each device.
+    pub connectivity: ConnectivityStore,
     /// Pending pairing requests: deviceId -> decision sender.
     pending_pairs: Mutex<HashMap<String, oneshot::Sender<PairDecision>>>,
     /// Latest control channel per device.
@@ -329,6 +334,7 @@ impl App {
             events,
             notifications: NotificationStore::new(),
             battery: BatteryStore::new(),
+            connectivity: ConnectivityStore::new(),
             pending_pairs: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             link_generation: AtomicU64::new(0),
@@ -382,6 +388,7 @@ impl App {
         self.registry.set_paired(id, false).await;
         self.notifications.clear_device(id).await;
         self.battery.clear_device(id).await;
+        self.connectivity.clear_device(id).await;
         self.trusted.remove(id).await;
         let _ = self
             .events
@@ -489,6 +496,9 @@ impl App {
             }
             if plugin == battery::BATTERY_PACKET {
                 self.battery.clear_device(device_id).await;
+            }
+            if plugin == connectivity_report::CONNECTIVITY_REPORT_PACKET {
+                self.connectivity.clear_device(device_id).await;
             }
         }
         if self
@@ -714,6 +724,8 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use tokio::sync::{mpsc, oneshot};
 
     use super::*;
@@ -861,6 +873,52 @@ mod tests {
             app.battery.get(&device_id).await,
             battery::BatteryStatus::UNKNOWN
         );
+    }
+
+    #[tokio::test]
+    async fn unpair_clears_connectivity_report() {
+        let (app, device_id, _events) = app_with_phone().await;
+        app.connectivity
+            .upsert(
+                &device_id,
+                BTreeMap::from([(
+                    "6".to_owned(),
+                    connectivity_report::SignalState {
+                        network_type: "LTE".to_owned(),
+                        signal_strength: 3,
+                    },
+                )]),
+            )
+            .await;
+
+        assert!(app.unpair(&device_id, false).await);
+        assert!(app.connectivity.get(&device_id).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabling_connectivity_report_plugin_clears_report() {
+        let (app, device_id, _events) = app_with_phone().await;
+        app.connectivity
+            .upsert(
+                &device_id,
+                BTreeMap::from([(
+                    "6".to_owned(),
+                    connectivity_report::SignalState {
+                        network_type: "LTE".to_owned(),
+                        signal_strength: 3,
+                    },
+                )]),
+            )
+            .await;
+
+        app.set_plugin_enabled(
+            &device_id,
+            connectivity_report::CONNECTIVITY_REPORT_PACKET,
+            false,
+        )
+        .await
+        .expect("supported plugin");
+        assert!(app.connectivity.get(&device_id).await.is_empty());
     }
 
     #[tokio::test]

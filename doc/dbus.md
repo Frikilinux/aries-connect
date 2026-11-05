@@ -69,6 +69,7 @@ All properties are read-only.
 | `Plugins` | `a{sb}` | Every implemented plugin and whether it is enabled for this device |
 | `BatteryLevel` | `i` | Last reported charge (`0..=100`), or `-1` when unknown |
 | `IsCharging` | `b` | Whether the device reported that it is charging |
+| `SignalStrengths` | `a{s(si)}` | Coarse signal strength per subscription (SIM): id → `(networkType, level)`, level `0..=4` |
 
 Changes are announced with `org.freedesktop.DBus.Properties.PropertiesChanged`
 on the device object. `Plugins` always lists every plugin the daemon
@@ -175,6 +176,26 @@ keepalive: the daemon probes the control channel after 15 s of inactivity and
 gives up after three unanswered probes, so `Connected` flips to `false` and the
 battery status is cleared within roughly 30 s.
 
+## Connectivity report
+
+The phone pushes `kdeconnect.connectivity_report` with the coarse signal
+strength of each subscription (SIM). `SignalStrengths` mirrors the last report
+and is announced with `PropertiesChanged` on the device object:
+
+```text
+a{s(si)} = {
+  "6":  ["LTE", 3],
+  "17": ["HSPA", 0],
+}
+```
+
+The key is the subscription id, `networkType` is the cellular technology
+reported by the phone and the level is an integer in `0..=4` (bars, not dBm).
+The value is an empty map until the first report, when the plugin is disabled,
+after unpairing and when the control channel closes. Reports are accepted only
+from paired devices with the `kdeconnect.connectivity_report` plugin enabled;
+repeated identical reports do not emit `PropertiesChanged`.
+
 ## Clipboard
 
 Clipboard sync is bidirectional and text-only. The daemon **does not read or
@@ -234,8 +255,10 @@ is not active or the notifications plugin is disabled.
 
 ## Plugins
 
-`Plugins` lists every plugin implemented by the daemon (`kdeconnect.notification`
-and `kdeconnect.ping`) with its state for that device. Toggling one:
+`Plugins` lists every plugin implemented by the daemon
+(`kdeconnect.notification`, `kdeconnect.ping`, `kdeconnect.battery`,
+`kdeconnect.clipboard` and `kdeconnect.connectivity_report`) with its state for
+that device. Toggling one:
 
 ```sh
 busctl --user call dev.zotta.AriesConnect \
@@ -300,6 +323,10 @@ busctl --user call dev.zotta.AriesConnect \
 # read the last reported battery state
 busctl --user get-property dev.zotta.AriesConnect \
   /dev/zotta/AriesConnect/Device/<id> dev.zotta.AriesConnect.Device BatteryLevel
+
+# read the signal strength of each subscription (SIM)
+busctl --user get-property dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> dev.zotta.AriesConnect.Device SignalStrengths
 
 # send text to the phone clipboard
 busctl --user call dev.zotta.AriesConnect \
