@@ -352,8 +352,9 @@ async fn handle_connection(
     if was_current {
         tracing::info!(device = %peer_id, "control channel closed");
         app.registry.set_connected(&peer_id, false).await;
-        // Do not keep a stale battery level while the phone is offline.
+        // Do not keep stale status while the phone is offline.
         app.battery.clear_device(&peer_id).await;
+        app.connectivity.clear_device(&peer_id).await;
         let _ = app.events.send(Event::Disconnected {
             id: peer_id.clone(),
         });
@@ -408,6 +409,10 @@ async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket
         }
         "kdeconnect.clipboard" | "kdeconnect.clipboard.connect" => {
             crate::plugins::clipboard::handle_packet(app, peer_id.as_deref(), &packet).await;
+        }
+        "kdeconnect.connectivity_report" => {
+            crate::plugins::connectivity_report::handle_packet(app, peer_id.as_deref(), &packet)
+                .await;
         }
         "kdeconnect.notification" => {
             crate::plugins::notifications::handle_packet(app, peer_id.as_deref(), &packet).await;

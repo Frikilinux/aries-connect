@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clipboard plugin (`kdeconnect.clipboard`): `SendClipboard`,
   `SendClipboardConnect` and the `ClipboardReceived` signal; the daemon relays
   text and leaves the local clipboard to a session client.
+- Connectivity report plugin (`kdeconnect.connectivity_report`):
+  `SignalStrengths` (`a{s(si)}`) on the device object maps each subscription
+  (SIM) id to its network type and coarse signal level (`0..=4`). It is
+  announced with `PropertiesChanged` and cleared on disconnect, unpair or when
+  the plugin is disabled.
 
 ### Fixed
 

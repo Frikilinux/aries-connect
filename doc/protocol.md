@@ -47,9 +47,10 @@ The phone is always the TCP initiator; AriesConnect only accepts connections.
    `{"id": <ms>, "type": "...", "body": {...}}`.
 
 Implemented packet types: `kdeconnect.identity`, `kdeconnect.pair`,
-`kdeconnect.notification` and `kdeconnect.ping`;
-`kdeconnect.notification.request` is sent to dismiss notifications on the
-phone. Unsupported types are ignored (debug log).
+`kdeconnect.notification`, `kdeconnect.ping`, `kdeconnect.battery`,
+`kdeconnect.clipboard`, `kdeconnect.clipboard.connect` and
+`kdeconnect.connectivity_report`; `kdeconnect.notification.request` is sent to
+dismiss notifications on the phone. Unsupported types are ignored (debug log).
 
 ## Notifications
 
@@ -116,6 +117,33 @@ Note that KDE Connect Android advertises `kdeconnect.battery` in its identity
 even when the plugin is disabled for a device, so turning the plugin off on the
 phone is only visible to the daemon through the absence of updates, not through
 a capability change.
+
+## Connectivity report
+
+The phone pushes `kdeconnect.connectivity_report` with the coarse signal
+strength of each subscription (SIM):
+
+```json
+{
+  "signalStrengths": {
+    "6": { "networkType": "LTE", "signalStrength": 3 },
+    "17": { "networkType": "HSPA", "signalStrength": 0 }
+  }
+}
+```
+
+The key is an arbitrary subscription id. `networkType` is the cellular
+technology (`GSM`, `CDMA`, `UMTS`, `LTE`, `5G`, `HSPA`, ...) and
+`signalStrength` is a level in `0..=4`, not dBm. AriesConnect stores the last
+map per device while it is connected and exposes it as `SignalStrengths`
+(`a{s(si)}`) on the device object, announced with `PropertiesChanged`. The map
+is cleared when the control channel closes, when the device is unpaired or when
+the plugin is disabled.
+
+Reports are accepted only from **paired** devices with the
+`kdeconnect.connectivity_report` plugin enabled. The daemon consumes the
+current `signalStrengths` form; the older flat fields (`networkType`,
+`wifiLinkSpeed`, `wifiFrequency`, coordinates, ...) are ignored.
 
 ## Clipboard
 
