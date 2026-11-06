@@ -103,6 +103,23 @@ before the phone reflects it.
 Incoming pings are dropped with a debug log when they come from an unpaired
 device or when the plugin is disabled for it.
 
+## Find My Phone
+
+Both directions use the same `kdeconnect.findmyphone.request` packet with an
+empty body `{}`. The receiver is asked to announce its location, usually by
+playing a sound like a traditional cordless phone. By convention, sending a
+second request cancels the previous one, so the same packet toggles the ringing.
+
+AriesConnect only implements the outgoing direction: `FindMyPhone()` on the
+device object sends the request to a paired phone. Incoming requests are
+consumed (and logged at debug level) but the daemon has no audio output, so it
+does not ring; a frontend can implement the reverse direction on top of the
+protocol.
+
+The plugin is advertised in both `incomingCapabilities` and
+`outgoingCapabilities`, gated by pairing and the per-device plugin toggle, just
+like ping.
+
 ## Battery
 
 The device that has a battery pushes `kdeconnect.battery` when the control

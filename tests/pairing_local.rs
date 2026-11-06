@@ -395,6 +395,24 @@ async fn ping_flow_works() {
 }
 
 #[tokio::test]
+async fn find_my_phone_request_reaches_the_phone() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    app.mark_paired(PHONE_ID).await;
+
+    app.send_find_my_phone(PHONE_ID)
+        .await
+        .expect("find-my-phone delivered");
+    let packet = tokio::time::timeout(Duration::from_secs(5), read_packet(&mut reader))
+        .await
+        .expect("find-my-phone reaches the phone");
+    assert_eq!(packet.packet_type, "kdeconnect.findmyphone.request");
+    assert_eq!(packet.body, serde_json::json!({}));
+}
+
+#[tokio::test]
 async fn pings_from_unpaired_devices_are_ignored() {
     let (app, port, mut events) = spawn_daemon().await;
     let mut reader = phone_handshake(port).await;

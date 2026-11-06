@@ -414,6 +414,9 @@ async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket
             crate::plugins::connectivity_report::handle_packet(app, peer_id.as_deref(), &packet)
                 .await;
         }
+        "kdeconnect.findmyphone.request" => {
+            crate::plugins::find_my_phone::handle_packet(app, peer_id.as_deref(), &packet).await;
+        }
         "kdeconnect.notification" => {
             crate::plugins::notifications::handle_packet(app, peer_id.as_deref(), &packet).await;
         }
