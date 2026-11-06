@@ -769,6 +769,24 @@ async fn disconnect_clears_connectivity_report() {
 }
 
 #[tokio::test]
+async fn name_change_is_sent_to_the_connected_device() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+
+    app.set_local_name("Renamed Desktop")
+        .await
+        .expect("set local name");
+
+    let packet = tokio::time::timeout(Duration::from_secs(10), read_packet(&mut reader))
+        .await
+        .expect("identity update must arrive before the timeout");
+    assert_eq!(packet.packet_type, "kdeconnect.identity");
+    let body = parse_identity(&packet).expect("identity packet");
+    assert_eq!(body.device_name, "Renamed Desktop");
+}
+
+#[tokio::test]
 async fn disconnect_clears_battery_status() {
     let (app, port, mut events) = spawn_daemon().await;
     let mut reader = phone_handshake(port).await;

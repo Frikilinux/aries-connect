@@ -4,6 +4,7 @@
 //! AriesConnect: a KDE Connect-compatible daemon without KDE/Qt dependencies.
 
 pub mod app;
+pub mod config;
 pub mod core {
     pub mod discovery;
     pub mod network;

@@ -221,7 +221,7 @@ async fn handle_connection(
         .get("targetDeviceId")
         .and_then(|v| v.as_str())
     {
-        if target != app.local.device_id {
+        if target != app.local_id().await {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "connection request for another device id",
@@ -265,7 +265,7 @@ async fn handle_connection(
     let mut reader = BufReader::new(tls_reader);
 
     // --- 3. Identity exchange over TLS (protocol >= 8) ---------------------
-    send_packet(&mut writer, &app.local.packet()).await?;
+    send_packet(&mut writer, &app.local_packet().await).await?;
     let secure_line =
         read_tls_line(&mut reader, MAX_IDENTITY_BYTES, SECURE_IDENTITY_TIMEOUT).await?;
     let secure_packet: NetworkPacket = parse_json(&secure_line, "secure identity")?;
@@ -391,7 +391,7 @@ async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket
         "kdeconnect.identity" => {
             // Late identity updates (e.g. device rename) are accepted.
             if let Some(body) = parse_identity(&packet) {
-                if body.device_id == app.local.device_id {
+                if body.device_id == app.local_id().await {
                     return;
                 }
                 app.seen(&body, true).await;
