@@ -127,8 +127,8 @@ fn udp_socket(port: u16) -> io::Result<UdpSocket> {
 /// over UDP. Old ones prepend a random salt plus `kdeconnect.`. We emit both
 /// variants when replying, because receiver implementations differ, and the
 /// payloads are tiny.
-fn identity_datagrams(app: &App) -> [Vec<u8>; 2] {
-    let json = serde_json::to_vec(&app.local.packet()).expect("identity serializes");
+async fn identity_datagrams(app: &App) -> [Vec<u8>; 2] {
+    let json = serde_json::to_vec(&app.local_packet().await).expect("identity serializes");
     let mut prefixed = Vec::with_capacity(24 + json.len());
     prefixed.extend_from_slice(format!("{:x}", rand::random::<u64>()).as_bytes());
     prefixed.extend_from_slice(b"kdeconnect.");
@@ -205,7 +205,7 @@ async fn announce_loop(
     port: u16,
 ) {
     loop {
-        let dgrams = identity_datagrams(&app);
+        let dgrams = identity_datagrams(&app).await;
         let mut targets = broadcast_targets.clone();
         targets.extend(peers.targets(port));
         targets.sort_by_key(|a| a.ip());
@@ -217,7 +217,11 @@ async fn announce_loop(
                 }
             }
         }
-        tokio::time::sleep(ANNOUNCE_INTERVAL).await;
+        // A name change wakes the loop before the regular interval elapses.
+        tokio::select! {
+            () = tokio::time::sleep(ANNOUNCE_INTERVAL) => {}
+            () = app.wait_for_announce() => {}
+        }
     }
 }
 
@@ -227,7 +231,7 @@ async fn announce_loop(
 /// `ip:1716` may reach nobody: we answer to the exact source address *and*
 /// to the conventional port, in both packet framings.
 async fn reply_unicast(app: &App, socket: &UdpSocket, from: SocketAddr, our_port: u16) {
-    let dgrams = identity_datagrams(app);
+    let dgrams = identity_datagrams(app).await;
     let mut targets = vec![from];
     let conventional = SocketAddr::new(from.ip(), our_port);
     if conventional != from {
@@ -308,8 +312,9 @@ async fn receive_loop(
             }
         };
 
+        let local_id = app.local_id().await;
         match crate::identity::parse_identity(&packet) {
-            Some(body) if body.device_id == app.local.device_id => {
+            Some(body) if body.device_id == local_id => {
                 // Our own broadcast looping back (loopback or LAN echo).
                 tracing::trace!("ignoring our own identity datagram");
             }
@@ -346,7 +351,7 @@ async fn receive_loop(
                 // re-announce once to every interface (once per device, to
                 // avoid broadcast ping-pong between daemons).
                 if created {
-                    let dgrams = identity_datagrams(&app);
+                    let dgrams = identity_datagrams(&app).await;
                     for target in &targets {
                         for dgram in &dgrams {
                             let _ = socket.send_to(dgram, target).await;

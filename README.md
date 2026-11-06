@@ -14,6 +14,7 @@ control channel and exposes devices, pairing and events over D-Bus
 - [x] Pairing and unpairing with certificate pinning
 - [x] D-Bus API (`dev.zotta.AriesConnect`, per-device objects)
 - [x] Per-device plugin configuration (`Plugins`, `SetPluginEnabled`)
+- [x] Configurable device name (`config.json`, `DeviceName`, `SetDeviceName`)
 
 ### Plugins
 
@@ -50,6 +51,16 @@ cargo build --release
 
 The identity certificate (RSA-2048) and the 32-character device id are created
 on first run and reused afterwards.
+
+Other devices see the host name by default. To announce a different name:
+
+```sh
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect SetDeviceName s "My Desktop"
+```
+
+The value is stored in `$AC_DATA_DIR/config.json`; an empty name resets it to
+the host name. Connected phones receive the new identity immediately.
 
 ## Systemd user unit
 

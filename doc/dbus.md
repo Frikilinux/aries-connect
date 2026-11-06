@@ -21,12 +21,20 @@ directory.
 
 `/dev/zotta/AriesConnect`, interface `dev.zotta.AriesConnect`.
 
+| Property | Type | Description |
+| --- | --- | --- |
+| `DeviceName` | `s` | Name this daemon announces to other devices |
+
 | Method | Signature | Description |
 | --- | --- | --- |
 | `AcceptPairing(deviceId)` | `s` | Accepts the pending pairing request |
 | `RejectPairing(deviceId)` | `s` | Rejects the pending pairing request |
 | `Devices()` | `-` | Snapshot of known devices as `(id, name, paired, connected)` — `a(ssbb)` |
 | `ActiveNotifications()` | `-` | Notifications of every device as `(deviceId, id, appName, title, text)` — `a(sssss)` |
+| `SetDeviceName(name)` | `s` | Changes the announced name, persists it and re-announces the identity. An empty name resets it to the host name; the maximum is 128 characters |
+
+Changes to `DeviceName` are announced with
+`org.freedesktop.DBus.Properties.PropertiesChanged` on the service object.
 
 | Signal | Payload | Meaning |
 | --- | --- | --- |
@@ -296,6 +304,13 @@ busctl --user monitor dev.zotta.AriesConnect
 # accept a pending pairing request
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
   dev.zotta.AriesConnect AcceptPairing s <deviceId>
+
+# change the name announced to other devices (empty resets to the host name)
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect SetDeviceName s "My Desktop"
+
+busctl --user get-property dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect DeviceName
 
 # snapshot of known devices
 busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \

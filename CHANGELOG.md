@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (SIM) id to its network type and coarse signal level (`0..=4`). It is
   announced with `PropertiesChanged` and cleared on disconnect, unpair or when
   the plugin is disabled.
+- Configurable device name: the daemon announces the host name by default, and
+  `DeviceName` / `SetDeviceName` on the service object read and change it. The
+  override is persisted in `config.json`; an empty name resets it to the host
+  name. Connected devices receive the new identity immediately.
 
 ### Fixed
 

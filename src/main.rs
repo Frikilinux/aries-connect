@@ -87,8 +87,10 @@ async fn main() {
 
     let port = port();
     let dir = data_dir();
+    let config = aries_connect::config::ConfigStore::load(&dir, hostname());
+    let device_name = config.effective_name().await;
     tracing::info!(
-        hostname = hostname(),
+        device_name = %device_name,
         port,
         data_dir = %dir.display(),
         "starting aries-connect"
@@ -117,10 +119,11 @@ async fn main() {
     // Shared state + event channel toward D-Bus.
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let trusted = aries_connect::trusted::TrustedStore::load(&dir);
-    let app = App::new(
-        LocalIdentity::new(device_id, hostname(), port),
+    let app = App::with_config(
+        LocalIdentity::new(device_id, device_name, port),
         events_tx,
         trusted,
+        config,
     );
     app.seed_trusted().await;
 

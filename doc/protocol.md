@@ -52,6 +52,18 @@ Implemented packet types: `kdeconnect.identity`, `kdeconnect.pair`,
 `kdeconnect.connectivity_report`; `kdeconnect.notification.request` is sent to
 dismiss notifications on the phone. Unsupported types are ignored (debug log).
 
+## Device name
+
+The `deviceName` field of `kdeconnect.identity` is what other devices show. It
+defaults to the host name and can be changed at runtime through the D-Bus
+`SetDeviceName` method; the daemon persists the override in `config.json`,
+sends a fresh identity over every active control channel and wakes the UDP
+announce loop so peers see it without reconnecting. The device id and
+certificate do not change, so pairing is preserved.
+
+AriesConnect also accepts late `kdeconnect.identity` packets from a peer, which
+is how a phone rename is reflected in `DeviceName` while connected.
+
 ## Notifications
 
 Notifications are mirrored only for **paired** devices with their

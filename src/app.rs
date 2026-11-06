@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock};
 
+use crate::config::{ConfigStore, MAX_DEVICE_NAME_CHARS};
 use crate::identity::{pair_packet, IdentityBody, LocalIdentity, NetworkPacket};
 use crate::plugins::battery::{self, BatteryStore};
 use crate::plugins::clipboard::{self, ClipboardError};
@@ -67,6 +68,8 @@ pub enum Event {
     /// an unpaired device, so the device object is kept and only `Paired`
     /// changes.
     PairingRemoved { id: String },
+    /// The name this daemon announces to other devices changed.
+    LocalNameChanged { name: String },
 }
 
 /// Commands arriving from the D-Bus interface toward the core.
@@ -102,6 +105,11 @@ pub enum UiCommand {
         enabled: bool,
         /// Result of the toggle, sent back to the D-Bus caller.
         reply: oneshot::Sender<Result<(), PluginError>>,
+    },
+    SetDeviceName {
+        name: String,
+        /// Effective name after the change, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), DeviceNameError>>,
     },
 }
 
@@ -180,6 +188,31 @@ impl std::fmt::Display for PluginError {
 }
 
 impl std::error::Error for PluginError {}
+
+/// Why a device name was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceNameError {
+    /// The name exceeds [`MAX_DEVICE_NAME_CHARS`].
+    TooLong { max: usize, actual: usize },
+    /// The new name could not be written to `config.json`.
+    Persist(String),
+}
+
+impl std::fmt::Display for DeviceNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLong { max, actual } => {
+                write!(
+                    f,
+                    "device name is {actual} characters; the maximum is {max}"
+                )
+            }
+            Self::Persist(e) => write!(f, "cannot persist the device name: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DeviceNameError {}
 
 /// Registry of known devices.
 pub struct DeviceRegistry {
@@ -303,9 +336,12 @@ struct LinkHandle {
 
 /// Shared daemon state, cloned into every task as an `Arc`.
 pub struct App {
-    pub local: LocalIdentity,
+    /// Local identity announced over UDP and TLS. Its name is mutable.
+    pub local: RwLock<LocalIdentity>,
     pub registry: DeviceRegistry,
     pub trusted: TrustedStore,
+    /// Persistent daemon configuration (display name).
+    pub config: ConfigStore,
     /// Channel of events toward D-Bus.
     pub events: mpsc::UnboundedSender<Event>,
     /// Active notifications mirrored from paired devices.
@@ -319,18 +355,33 @@ pub struct App {
     /// Latest control channel per device.
     links: Mutex<HashMap<String, LinkHandle>>,
     link_generation: AtomicU64,
+    /// Wakes the UDP announce loop after a local name change.
+    announce_wakeup: Notify,
 }
 
 impl App {
+    /// In-memory configuration (tests and embedders that do not persist it).
     pub fn new(
         local: LocalIdentity,
         events: mpsc::UnboundedSender<Event>,
         trusted: TrustedStore,
     ) -> Arc<Self> {
+        let config = ConfigStore::in_memory(local.device_name.clone());
+        Self::with_config(local, events, trusted, config)
+    }
+
+    /// Builds the shared state with an explicit configuration store.
+    pub fn with_config(
+        local: LocalIdentity,
+        events: mpsc::UnboundedSender<Event>,
+        trusted: TrustedStore,
+        config: ConfigStore,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            local,
+            local: RwLock::new(local),
             registry: DeviceRegistry::new(),
             trusted,
+            config,
             events,
             notifications: NotificationStore::new(),
             battery: BatteryStore::new(),
@@ -338,7 +389,99 @@ impl App {
             pending_pairs: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             link_generation: AtomicU64::new(0),
+            announce_wakeup: Notify::new(),
         })
+    }
+
+    /// Clone of the current local identity.
+    pub async fn local_identity(&self) -> LocalIdentity {
+        self.local.read().await.clone()
+    }
+
+    /// Device id of this daemon.
+    pub async fn local_id(&self) -> String {
+        self.local.read().await.device_id.clone()
+    }
+
+    /// Name this daemon announces to other devices.
+    pub async fn local_name(&self) -> String {
+        self.local.read().await.device_name.clone()
+    }
+
+    /// Identity packet with the current name and capabilities.
+    pub async fn local_packet(&self) -> NetworkPacket {
+        self.local.read().await.packet()
+    }
+
+    /// Wakes the UDP announce loop so a new identity is broadcast immediately.
+    pub fn request_announce(&self) {
+        self.announce_wakeup.notify_one();
+    }
+
+    /// Resolves when [`App::request_announce`] is called.
+    pub async fn wait_for_announce(&self) {
+        self.announce_wakeup.notified().await;
+    }
+
+    /// Changes the name announced to other devices and persists it.
+    ///
+    /// A blank name clears the override and falls back to the host name. The
+    /// identity is re-sent over every active control channel and the UDP
+    /// announce loop wakes up, so peers see the new name without reconnecting.
+    pub async fn set_local_name(&self, name: &str) -> Result<String, DeviceNameError> {
+        let trimmed = name.trim();
+        let actual = trimmed.chars().count();
+        if actual > MAX_DEVICE_NAME_CHARS {
+            return Err(DeviceNameError::TooLong {
+                max: MAX_DEVICE_NAME_CHARS,
+                actual,
+            });
+        }
+        let configured = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        };
+        self.config
+            .set_device_name(configured)
+            .await
+            .map_err(|e| DeviceNameError::Persist(e.to_string()))?;
+
+        let effective = self.config.effective_name().await;
+        let changed = {
+            let mut local = self.local.write().await;
+            if local.device_name == effective {
+                false
+            } else {
+                local.device_name = effective.clone();
+                true
+            }
+        };
+        if changed {
+            self.broadcast_identity().await;
+            self.request_announce();
+            self.emit(Event::LocalNameChanged {
+                name: effective.clone(),
+            });
+        }
+        Ok(effective)
+    }
+
+    /// Sends the current identity over every active control channel.
+    async fn broadcast_identity(&self) {
+        let packet = self.local_packet().await;
+        let senders: Vec<(String, mpsc::UnboundedSender<NetworkPacket>)> = {
+            let links = self.links.lock().await;
+            links
+                .iter()
+                .map(|(id, link)| (id.clone(), link.tx.clone()))
+                .collect()
+        };
+        for (id, tx) in senders {
+            if let Err(e) = tx.send(packet.clone()) {
+                tracing::debug!(device = %id, error = %e, "cannot send identity update");
+            }
+        }
     }
 
     /// Seeds the registry from the persisted trust store.
@@ -718,6 +861,14 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                 }
                 let _ = reply.send(result);
             }
+            UiCommand::SetDeviceName { name, reply } => {
+                tracing::info!(name = %name, "set_device_name");
+                let result = app.set_local_name(&name).await;
+                if let Err(e) = &result {
+                    tracing::warn!(error = %e, "cannot change the device name");
+                }
+                let _ = reply.send(result.map(|_| ()));
+            }
         }
     }
 }
@@ -730,6 +881,103 @@ mod tests {
 
     use super::*;
     use crate::trusted::TrustedStore;
+
+    fn desktop() -> (Arc<App>, mpsc::UnboundedReceiver<Event>) {
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        (app, events_rx)
+    }
+
+    #[tokio::test]
+    async fn sets_and_resets_the_local_name() {
+        let (app, mut events) = desktop();
+        assert_eq!(app.local_name().await, "Desktop");
+
+        assert_eq!(
+            app.set_local_name("  New Name  ")
+                .await
+                .expect("valid name"),
+            "New Name"
+        );
+        assert_eq!(app.local_name().await, "New Name");
+        match events.try_recv().expect("name event") {
+            Event::LocalNameChanged { name } => assert_eq!(name, "New Name"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        assert_eq!(
+            app.local_packet().await.body["deviceName"],
+            serde_json::json!("New Name")
+        );
+
+        // An empty name clears the override and falls back to the host name.
+        assert_eq!(app.set_local_name("   ").await.expect("reset"), "Desktop");
+        assert_eq!(app.local_name().await, "Desktop");
+        match events.try_recv().expect("reset event") {
+            Event::LocalNameChanged { name } => assert_eq!(name, "Desktop"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_name_is_not_announced() {
+        let (app, mut events) = desktop();
+
+        app.set_local_name("Desktop").await.expect("same name");
+        assert!(
+            events.try_recv().is_err(),
+            "unchanged names must not emit an event"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_names_over_the_limit() {
+        let (app, mut events) = desktop();
+        let long = "x".repeat(MAX_DEVICE_NAME_CHARS + 1);
+
+        assert!(matches!(
+            app.set_local_name(&long).await,
+            Err(DeviceNameError::TooLong { .. })
+        ));
+        assert_eq!(app.local_name().await, "Desktop");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn name_change_is_sent_over_active_links() {
+        let (app, _events) = desktop();
+        let device_id = "b".repeat(32);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.register_link(&device_id, tx, None).await;
+
+        app.set_local_name("Renamed Desktop")
+            .await
+            .expect("valid name");
+
+        let packet = rx.recv().await.expect("identity update");
+        assert_eq!(packet.packet_type, "kdeconnect.identity");
+        let body = crate::identity::parse_identity(&packet).expect("identity packet");
+        assert_eq!(body.device_name, "Renamed Desktop");
+    }
+
+    #[tokio::test]
+    async fn set_device_name_command_replies_with_the_effective_name() {
+        let (app, _events) = desktop();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        tokio::spawn(command_loop(app.clone(), cmd_rx));
+
+        let (reply, response) = oneshot::channel();
+        cmd_tx
+            .send(UiCommand::SetDeviceName {
+                name: "Commanded".to_owned(),
+                reply,
+            })
+            .expect("command queued");
+
+        assert_eq!(response.await.expect("reply"), Ok(()));
+        assert_eq!(app.local_name().await, "Commanded");
+    }
 
     #[tokio::test]
     async fn ping_command_reports_delivery_errors() {

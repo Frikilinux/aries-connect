@@ -66,6 +66,26 @@ impl AriesConnectIface {
             .collect())
     }
 
+    /// Name this daemon announces to other devices.
+    #[zbus(property)]
+    async fn device_name(&self) -> String {
+        self.app.local_name().await
+    }
+
+    /// Change the name announced to other devices. The value is persisted in
+    /// `config.json`; an empty name clears the override and falls back to the
+    /// host name. Connected devices receive the new identity immediately.
+    async fn set_device_name(&self, name: String) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(UiCommand::SetDeviceName { name, reply })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
     /// List active notifications as
     /// (deviceId, notificationId, appName, title, text) tuples.
     async fn active_notifications(
@@ -501,6 +521,26 @@ fn device_emitter(conn: &zbus::Connection, device_id: &str) -> Option<SignalEmit
     Some(SignalEmitter::from_parts(conn.clone(), path.into()))
 }
 
+/// Emits `PropertiesChanged` for `DeviceName` on the service object.
+async fn emit_service_name_changed(conn: &zbus::Connection) {
+    let iface_ref = match conn
+        .object_server()
+        .interface::<_, AriesConnectIface>(DBUS_PATH)
+        .await
+    {
+        Ok(iface) => iface,
+        Err(e) => {
+            tracing::debug!(error = %e, "service object not available for PropertiesChanged");
+            return;
+        }
+    };
+    let emitter = iface_ref.signal_emitter();
+    let iface = iface_ref.get().await;
+    if let Err(e) = iface.device_name_changed(emitter).await {
+        tracing::warn!(error = %e, "failed to emit service PropertiesChanged");
+    }
+}
+
 /// Forwards core events to D-Bus: keeps device objects in sync and emits the
 /// remaining signals.
 async fn event_loop(
@@ -536,6 +576,9 @@ async fn event_loop(
                 if renamed {
                     emit_property_changed(&conn, &id, DeviceProperty::Name).await;
                 }
+            }
+            Event::LocalNameChanged { .. } => {
+                emit_service_name_changed(&conn).await;
             }
             Event::Connected { id } => {
                 ensure_device_object(&conn, &app, &cmd_tx, &id).await;
@@ -752,6 +795,52 @@ mod tests {
             cmd_tx,
             device_id,
         }
+    }
+
+    async fn service_iface() -> (
+        AriesConnectIface,
+        Arc<App>,
+        tokio::sync::mpsc::UnboundedReceiver<UiCommand>,
+    ) {
+        use tokio::sync::mpsc;
+
+        use crate::app::App;
+        use crate::identity::LocalIdentity;
+        use crate::trusted::TrustedStore;
+
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::new(local, events, TrustedStore::in_memory());
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        (
+            AriesConnectIface {
+                app: app.clone(),
+                cmd_tx,
+            },
+            app,
+            cmd_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn service_device_name_reflects_the_local_identity() {
+        let (iface, _app, _cmd_rx) = service_iface().await;
+
+        assert_eq!(iface.device_name().await, "Desktop");
+    }
+
+    #[tokio::test]
+    async fn set_device_name_updates_the_identity() {
+        let (iface, app, cmd_rx) = service_iface().await;
+        tokio::spawn(crate::app::command_loop(app.clone(), cmd_rx));
+
+        iface
+            .set_device_name("New Desktop".to_owned())
+            .await
+            .expect("set name");
+
+        assert_eq!(app.local_name().await, "New Desktop");
+        assert_eq!(iface.device_name().await, "New Desktop");
     }
 
     #[tokio::test]

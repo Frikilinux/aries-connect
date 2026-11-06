@@ -32,8 +32,20 @@ State lives in `$AC_DATA_DIR` (default `~/.local/share/aries-connect/`):
 | File                     | Contents                                        |
 | ------------------------ | ----------------------------------------------- |
 | `cert.pem` / `key.pem`   | Self-signed RSA-2048 identity certificate       |
+| `config.json`            | Daemon configuration (display name)             |
 | `device_id`              | 32-character KDE Connect device id              |
 | `devices/<id>/device.json` | One paired device: name, certificate SHA-256 fingerprint, last known IPv4 and per-plugin overrides |
+
+`config.json` only stores an override for the name announced to other devices:
+
+```json
+{
+  "deviceName": "My Desktop"
+}
+```
+
+When `deviceName` is absent, `null` or blank, the host name is used. The file is
+optional: the daemon starts with the host name when it does not exist.
 
 `device.json` example:
 
@@ -54,6 +66,34 @@ afterwards. Unpairing deletes the whole `devices/<id>/` directory.
 
 Deleting the state directory resets the identity: the phone will see a new
 device and must pair again.
+
+## Device name
+
+The name other devices see comes from `config.json`, falling back to the host
+name. Change it at runtime (the daemon persists it and re-announces its
+identity immediately):
+
+```sh
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect SetDeviceName s "My Desktop"
+```
+
+Read the current value:
+
+```sh
+busctl --user get-property dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect DeviceName
+```
+
+An empty string clears the override and returns to the host name:
+
+```sh
+busctl --user call dev.zotta.AriesConnect /dev/zotta/AriesConnect \
+  dev.zotta.AriesConnect SetDeviceName s ""
+```
+
+The maximum is 128 characters. Renaming does not affect pairing: the device id
+and certificate stay the same, so the phone keeps its trust.
 
 ## Pairing and unpairing
 
