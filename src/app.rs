@@ -12,6 +12,7 @@ use crate::identity::{pair_packet, IdentityBody, LocalIdentity, NetworkPacket};
 use crate::plugins::battery::{self, BatteryStore};
 use crate::plugins::clipboard::{self, ClipboardError};
 use crate::plugins::connectivity_report::{self, ConnectivityStore};
+use crate::plugins::find_my_phone;
 use crate::plugins::notifications::{self, NotificationStore};
 use crate::plugins::ping;
 use crate::trusted::{TrustedDevice, TrustedStore};
@@ -90,6 +91,11 @@ pub enum UiCommand {
         /// Result of the delivery attempt, sent back to the D-Bus caller.
         reply: oneshot::Sender<Result<(), PingError>>,
     },
+    FindMyPhone {
+        device_id: String,
+        /// Result of the delivery attempt, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), FindMyPhoneError>>,
+    },
     SendClipboard {
         device_id: String,
         content: String,
@@ -143,6 +149,30 @@ impl std::fmt::Display for PingError {
 }
 
 impl std::error::Error for PingError {}
+
+/// Why a find-my-phone request could not be delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindMyPhoneError {
+    /// The device is unknown or not paired.
+    NotPaired,
+    /// The `kdeconnect.findmyphone.request` plugin is disabled for the device.
+    PluginDisabled,
+    /// The device has no active control channel.
+    NotConnected,
+}
+
+impl std::fmt::Display for FindMyPhoneError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::NotPaired => "device is not paired",
+            Self::PluginDisabled => "kdeconnect.findmyphone.request is disabled for this device",
+            Self::NotConnected => "device has no active control channel",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for FindMyPhoneError {}
 
 /// Why a notification dismissal was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -615,6 +645,35 @@ impl App {
         Ok(())
     }
 
+    /// Asks a device to announce itself (ring). Fails when the device is not
+    /// paired, the `kdeconnect.findmyphone.request` plugin is disabled for it
+    /// or there is no active control channel.
+    pub async fn send_find_my_phone(&self, device_id: &str) -> Result<(), FindMyPhoneError> {
+        if self.trusted.get(device_id).await.is_none() {
+            tracing::debug!(device = %device_id, "cannot find an unpaired device");
+            return Err(FindMyPhoneError::NotPaired);
+        }
+        if !self
+            .trusted
+            .plugin_enabled(device_id, find_my_phone::FIND_MY_PHONE_PACKET)
+            .await
+        {
+            tracing::debug!(device = %device_id, "find-my-phone plugin is disabled for this device");
+            return Err(FindMyPhoneError::PluginDisabled);
+        }
+        if !self
+            .send_packet(device_id, &find_my_phone::request_packet())
+            .await
+        {
+            tracing::debug!(
+                device = %device_id,
+                "no active control channel to send the find-my-phone request"
+            );
+            return Err(FindMyPhoneError::NotConnected);
+        }
+        Ok(())
+    }
+
     /// Persists the per-device plugin state. Disabling a plugin also drops its
     /// active state (mirrored notifications) so clients resync once reenabled.
     /// Fails for unpaired devices and for plugins the daemon does not
@@ -817,6 +876,14 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                 let result = app.send_ping(&device_id, &message).await;
                 if let Err(e) = &result {
                     tracing::warn!(device = %device_id, error = %e, "cannot ping");
+                }
+                let _ = reply.send(result);
+            }
+            UiCommand::FindMyPhone { device_id, reply } => {
+                tracing::info!(device = %device_id, "find_my_phone");
+                let result = app.send_find_my_phone(&device_id).await;
+                if let Err(e) = &result {
+                    tracing::warn!(device = %device_id, error = %e, "cannot find my phone");
                 }
                 let _ = reply.send(result);
             }

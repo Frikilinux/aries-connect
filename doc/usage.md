@@ -151,6 +151,25 @@ The phone learns the available plugins from the identity it receives when it
 connects, so restart the phone app (or wait for it to reconnect) after upgrading
 the daemon for the ping action to appear.
 
+## Find My Phone
+
+Ask a paired, connected phone to announce itself (ring):
+
+```sh
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device FindMyPhone
+```
+
+The request has no argument. By convention, calling it a second time cancels
+the previous request. `FindMyPhone` fails with a D-Bus error when the device
+is not paired, the `kdeconnect.findmyphone.request` plugin is disabled for it
+or it is not connected.
+
+The daemon has no audio output, so requests received from a phone are consumed
+without ringing; a frontend can implement that direction on top of the
+protocol. The plugin can be toggled with `SetPluginEnabled` like any other.
+
 ## Troubleshooting
 
 - **The phone does not list the computer**: confirm both are on the same

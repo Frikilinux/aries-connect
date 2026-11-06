@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DeviceName` / `SetDeviceName` on the service object read and change it. The
   override is persisted in `config.json`; an empty name resets it to the host
   name. Connected devices receive the new identity immediately.
+- Find my phone plugin (`kdeconnect.findmyphone.request`): `FindMyPhone()` on
+  the device object asks a paired phone to announce itself (ring); the request
+  is sent over the active control channel and fails for unpaired, offline or
+  disabled devices. Incoming requests are consumed without ringing.
 
 ### Fixed
 

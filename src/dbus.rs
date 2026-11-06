@@ -296,6 +296,23 @@ impl DeviceIface {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
+    /// Ask the device to announce itself (ring), as `Find My Phone`. Fails
+    /// when the device is not paired, the plugin is disabled or it is not
+    /// connected.
+    async fn find_my_phone(&self) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(UiCommand::FindMyPhone {
+                device_id: self.device_id.clone(),
+                reply,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
     /// Send the local clipboard to the device. Empty text is ignored. Fails
     /// when the device is not paired, the plugin is disabled, it is not
     /// connected or the text exceeds 1 MiB.

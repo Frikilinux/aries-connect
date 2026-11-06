@@ -89,6 +89,7 @@ implements; plugins absent from `devices/<id>/device.json` count as enabled.
 | --- | --- | --- |
 | `Unpair()` | `-` | Forgets the pairing and notifies the phone when connected |
 | `Ping(message)` | `s` | Pings the device; the message may be empty. Fails if it cannot be delivered |
+| `FindMyPhone()` | `-` | Asks the device to announce itself (ring). Fails if it cannot be delivered |
 | `SendClipboard(text)` | `s` | Sends the local clipboard as `kdeconnect.clipboard`. Empty text is ignored; fails for unpaired/disabled/offline devices or text over 1 MiB |
 | `SendClipboardConnect(text, timestamp)` | `sx` | Sends `kdeconnect.clipboard.connect` with the clipboard timestamp |
 | `DismissNotification(notificationId)` | `s` | Dismisses a notification locally and on the phone; fails for unpaired devices, inactive notifications or a disabled plugin |
@@ -159,6 +160,22 @@ error (`org.freedesktop.DBus.Error.Failed`) when the ping cannot be delivered:
 A ping sent by the phone emits `PingReceived(message)` on the device object.
 Incoming pings from unpaired devices, or from devices with the plugin
 disabled, are dropped with a debug log and no signal.
+
+## Find My Phone
+
+`FindMyPhone()` asks the paired device to announce itself (ring), like a
+cordless phone. The `kdeconnect.findmyphone.request` packet has no body; by
+convention, sending a second request cancels the previous one. The call
+**fails** with a D-Bus error (`org.freedesktop.DBus.Error.Failed`) when the
+request cannot be delivered:
+
+- the device is not paired;
+- the `kdeconnect.findmyphone.request` plugin is disabled for it;
+- it has no active control channel, i.e. the phone is offline.
+
+The daemon has no audio output, so requests received from a phone are consumed
+without ringing; a frontend can implement the reverse direction on top of the
+protocol.
 
 ## Battery
 
