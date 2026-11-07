@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-07
+
 ### Added
 
 - Battery plugin (`kdeconnect.battery`): `BatteryLevel` and `IsCharging`
@@ -122,7 +124,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RejectPairing` methods plus device and pairing signals.
 - Persisted RSA-2048 identity certificate and 32-character device id.
 
-[Unreleased]: https://gitlab.com/zotta/aries-connect/compare/v0.3.0...HEAD
+[Unreleased]: https://gitlab.com/zotta/aries-connect/compare/v0.4.0...HEAD
+[0.4.0]: https://gitlab.com/zotta/aries-connect/releases/tag/v0.4.0
 [0.3.0]: https://gitlab.com/zotta/aries-connect/releases/tag/v0.3.0
 [0.2.0]: https://gitlab.com/zotta/aries-connect/releases/tag/v0.2.0
 [0.1.0]: https://gitlab.com/zotta/aries-connect/releases/tag/v0.1.0
