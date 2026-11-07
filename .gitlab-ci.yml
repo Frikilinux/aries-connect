@@ -36,6 +36,23 @@ cache:
 check:
   stage: check
   image: rust:latest
+  # Documentation-only changes skip the job. We list the paths that CAN affect
+  # the build: a commit touching docs *and* code still matches and builds.
+  rules:
+    - if: $CI_COMMIT_TAG
+    - changes:
+        - src/**
+        - tests/**
+        - Cargo.toml
+        - Cargo.lock
+        - rust-toolchain
+        - rust-toolchain.toml
+        - build.rs
+        - benches/**
+        - examples/**
+        - .cargo/**
+        - .gitlab-ci.yml
+        - .github/**
   script:
     - rustup component add rustfmt clippy
     - cargo fmt --all --check
@@ -50,9 +67,24 @@ check:
 release-build:
   stage: build
   image: ubuntu:22.04
+  # Same documentation-only rule as `check`: skip when nothing build-related
+  # changed, but still build if docs and code changed together.
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - src/**
+        - tests/**
+        - Cargo.toml
+        - Cargo.lock
+        - rust-toolchain
+        - rust-toolchain.toml
+        - build.rs
+        - benches/**
+        - examples/**
+        - .cargo/**
+        - .gitlab-ci.yml
+        - .github/**
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl git build-essential pkg-config
     - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
