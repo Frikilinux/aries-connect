@@ -12,43 +12,39 @@ stages:
 variables:
   CARGO_TERM_COLOR: "always"
   RUST_BACKTRACE: "1"
+  # Keep Cargo's registry inside the project so GitLab can cache it.
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
 
-# Shared cache for cargo. Keyed by lockfile so a dependency change rebuilds.
+# Cache the Cargo registry (small, high value): avoids re-fetching the
+# crates.io index and re-downloading crate sources on every run.
+# target/ is intentionally not cached: it is large and the dev and release
+# profiles would thrash the same key.
 cache:
   key:
     files:
       - Cargo.lock
   paths:
-    - target/
-    - .cargo/registry/
-    - .cargo/git/
+    - .cargo/registry/index/
+    - .cargo/registry/cache/
+    - .cargo/git/db/
 
 # ---------------------------------------------------------------------------
-# Check stage: format, lint, tests.
+# Check stage: a single job reuses the dev-profile target/ directory across
+# fmt, clippy and test instead of pulling and compiling in three parallel jobs.
 # ---------------------------------------------------------------------------
 
-fmt:
+check:
   stage: check
   image: rust:latest
   script:
-    - rustup component add rustfmt
+    - rustup component add rustfmt clippy
     - cargo fmt --all --check
-
-clippy:
-  stage: check
-  image: rust:latest
-  script:
-    - rustup component add clippy
     - cargo clippy --all-targets --locked -- -D warnings
-
-test:
-  stage: check
-  image: rust:latest
-  script:
     - cargo test --locked
 
 # ---------------------------------------------------------------------------
 # Build stage: release binary + packages (only on default branch and tags).
+# Kept on Ubuntu 22.04 so the published binary targets that glibc.
 # ---------------------------------------------------------------------------
 
 release-build:
@@ -60,11 +56,8 @@ release-build:
   before_script:
     - apt-get update -qq && apt-get install -y -qq curl git build-essential pkg-config
     - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-    - . "$HOME/.cargo/env"
-    - rustup component add rustfmt clippy
+    - . "$CARGO_HOME/env"
   script:
-    - . "$HOME/.cargo/env"
-    # Version check on tags, mirroring release.yml.
     - |
       if [ -n "$CI_COMMIT_TAG" ]; then
         version="${CI_COMMIT_TAG#v}"
@@ -74,9 +67,8 @@ release-build:
           exit 1
         fi
       fi
-    - cargo test --locked
+    # Tests already run in the check job; here we only build the release.
     - cargo build --release --locked
-    # Package source and binary, mirroring release.yml.
     - |
       if [ -n "$CI_COMMIT_TAG" ]; then
         version="${CI_COMMIT_TAG#v}"
@@ -102,6 +94,9 @@ release-build:
 
 # ---------------------------------------------------------------------------
 # Release stage: publish a GitLab release on tag push.
+# glab authenticates with the CI job token via GLAB_ENABLE_CI_AUTOLOGIN, which
+# uses the JOB-TOKEN header the Releases API accepts. Do not set
+# GITLAB_TOKEN="$CI_JOB_TOKEN": that is sent as PRIVATE-TOKEN and fails.
 # ---------------------------------------------------------------------------
 
 gitlab-release:
@@ -111,10 +106,13 @@ gitlab-release:
     - if: $CI_COMMIT_TAG
   needs:
     - release-build
+  cache: []
+  variables:
+    GLAB_ENABLE_CI_AUTOLOGIN: "true"
   script:
     - |
       version="${CI_COMMIT_TAG#v}"
-      # Extract release notes from CHANGELOG.md, mirroring release.yml.
+      # Extract the release notes for this version from CHANGELOG.md.
       awk -v header="## [$version]" '
         index($0, header) == 1 { found = 1; next }
         found && (/^## \[/ || /^\[[^]]+\]:/) { exit }
@@ -124,17 +122,7 @@ gitlab-release:
         echo "See CHANGELOG.md for details." > notes.md
       fi
     - |
-      prerelease=""
-      if printf '%s' "$version" | grep -Eq -- '-(alpha|beta|rc)'; then
-        prerelease="--prerelease"
-      fi
-    - |
-      # glab reads GITLAB_TOKEN; fall back to the job token if no PAT is set.
-      export GITLAB_TOKEN="${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
       glab release create "$CI_COMMIT_TAG" \
         --name "AriesConnect $CI_COMMIT_TAG" \
         --notes-file notes.md \
-        $prerelease \
         aries-connect-*.tar.gz SHA256SUMS
-  dependencies:
-    - release-build
