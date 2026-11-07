@@ -132,7 +132,7 @@ gitlab-release:
       # glab reads GITLAB_TOKEN; fall back to the job token if no PAT is set.
       export GITLAB_TOKEN="${GITLAB_TOKEN:-$CI_JOB_TOKEN}"
       glab release create "$CI_COMMIT_TAG" \
-        --title "AriesConnect $CI_COMMIT_TAG" \
+        --name "AriesConnect $CI_COMMIT_TAG" \
         --notes-file notes.md \
         $prerelease \
         aries-connect-*.tar.gz SHA256SUMS
