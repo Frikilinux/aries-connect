@@ -122,7 +122,10 @@ gitlab-release:
         echo "See CHANGELOG.md for details." > notes.md
       fi
     - |
+      # Upload assets to the generic package registry: unlike /uploads, it
+      # accepts the CI job token used by GLAB_ENABLE_CI_AUTOLOGIN.
       glab release create "$CI_COMMIT_TAG" \
         --name "AriesConnect $CI_COMMIT_TAG" \
         --notes-file notes.md \
+        --use-package-registry \
         aries-connect-*.tar.gz SHA256SUMS
