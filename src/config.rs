@@ -19,6 +19,10 @@ pub const MAX_DEVICE_NAME_CHARS: usize = 128;
 struct ConfigFile {
     #[serde(rename = "deviceName", default)]
     device_name: Option<String>,
+    /// Global cap for incoming shared files, in bytes. `None` keeps the
+    /// built-in default.
+    #[serde(rename = "maxIncomingSize", default)]
+    max_incoming_size: Option<u64>,
 }
 
 /// Persistent configuration of the daemon.
@@ -29,6 +33,8 @@ pub struct ConfigStore {
     default_name: String,
     /// Configured display name; `None` means "use `default_name`".
     device_name: RwLock<Option<String>>,
+    /// Global cap for incoming shared files, in bytes.
+    max_incoming_size: Option<u64>,
 }
 
 impl ConfigStore {
@@ -38,6 +44,7 @@ impl ConfigStore {
             path: None,
             default_name,
             device_name: RwLock::new(None),
+            max_incoming_size: None,
         }
     }
 
@@ -45,19 +52,9 @@ impl ConfigStore {
     /// leaves the defaults in place instead of failing startup.
     pub fn load(data_dir: &Path, default_name: String) -> Self {
         let path = data_dir.join(CONFIG_FILE);
-        let device_name = match std::fs::read(&path) {
+        let config = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<ConfigFile>(&bytes) {
-                Ok(config) => match normalize(config.device_name) {
-                    Some(name) if name.chars().count() > MAX_DEVICE_NAME_CHARS => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            max = MAX_DEVICE_NAME_CHARS,
-                            "ignoring configured device name that is too long"
-                        );
-                        None
-                    }
-                    name => name,
-                },
+                Ok(config) => Some(config),
                 Err(e) => {
                     tracing::warn!(
                         path = %path.display(),
@@ -78,11 +75,33 @@ impl ConfigStore {
             }
         };
 
+        let device_name =
+            config
+                .as_ref()
+                .and_then(|config| match normalize(config.device_name.clone()) {
+                    Some(name) if name.chars().count() > MAX_DEVICE_NAME_CHARS => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            max = MAX_DEVICE_NAME_CHARS,
+                            "ignoring configured device name that is too long"
+                        );
+                        None
+                    }
+                    name => name,
+                });
+        let max_incoming_size = config.and_then(|config| config.max_incoming_size);
+
         Self {
             path: Some(path),
             default_name,
             device_name: RwLock::new(device_name),
+            max_incoming_size,
         }
+    }
+
+    /// Global cap for incoming shared files, in bytes, when the config sets one.
+    pub fn max_incoming_size(&self) -> Option<u64> {
+        self.max_incoming_size
     }
 
     /// Name the daemon announces: the configured override, or the fallback.
@@ -113,6 +132,7 @@ impl ConfigStore {
                 path,
                 &ConfigFile {
                     device_name: name.clone(),
+                    max_incoming_size: self.max_incoming_size,
                 },
             )
             .await?;
@@ -229,5 +249,38 @@ mod tests {
 
         assert_eq!(store.effective_name().await, "Memory");
         assert_eq!(store.default_name(), "fallback");
+    }
+
+    #[test]
+    fn loads_a_global_max_incoming_size() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join(CONFIG_FILE),
+            r#"{"deviceName": "PC", "maxIncomingSize": 1048576}"#,
+        )
+        .expect("config file");
+        let store = ConfigStore::load(dir.path(), "fallback".to_owned());
+
+        assert_eq!(store.max_incoming_size(), Some(1_048_576));
+    }
+
+    #[tokio::test]
+    async fn renaming_preserves_the_size_limit() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join(CONFIG_FILE), r#"{"maxIncomingSize": 4096}"#)
+            .expect("config file");
+        let store = ConfigStore::load(dir.path(), "fallback".to_owned());
+        store
+            .set_device_name(Some("New Name".to_owned()))
+            .await
+            .expect("persist name");
+
+        let reloaded = ConfigStore::load(dir.path(), "fallback".to_owned());
+        assert_eq!(reloaded.effective_name().await, "New Name");
+        assert_eq!(
+            reloaded.max_incoming_size(),
+            Some(4096),
+            "renaming must not drop the size limit"
+        );
     }
 }

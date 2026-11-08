@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Share plugin (`kdeconnect.share.request`): share files, text and URLs in both
+  directions. The device object gains `SendFile`, `SendText`, `SendUrl`,
+  `SetDownloadDir` and the `DownloadDir` property, plus `TextReceived`,
+  `UrlReceived`, `FileReceived` and `ShareProgress` signals. Files travel over
+  a separate TLS payload channel (same identity certificate and pinning as the
+  control channel), are stored in the XDG download directory
+  (`$HOME/Downloads` fallback, created on demand) unless a per-device
+  `downloadDir` overrides it, and are capped by `maxIncomingSize` (per-device,
+  then `config.json`, then 500 MiB). The daemon never opens files or URLs.
+
 ## [0.4.0] - 2026-11-07
 
 ### Added

@@ -36,6 +36,14 @@ pub struct TrustedDevice {
     /// from the map are enabled.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub plugins: HashMap<String, bool>,
+    /// Where files shared by this device are saved. `None` inherits the
+    /// global (XDG) download directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
+    /// Per-device cap for incoming shared files, in bytes. `None` inherits the
+    /// global value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_incoming_size: Option<u64>,
 }
 
 impl TrustedDevice {
@@ -245,6 +253,46 @@ impl TrustedStore {
             .is_some_and(|device| device.plugin_enabled(plugin))
     }
 
+    /// Configured download directory for a device, if it overrides the global
+    /// one.
+    pub async fn download_dir(&self, id: &str) -> Option<String> {
+        self.devices
+            .read()
+            .await
+            .get(id)
+            .and_then(|device| device.download_dir.clone())
+    }
+
+    /// Stores (or with `None` clears) the per-device download directory and
+    /// persists the device file. Returns whether it changed.
+    pub async fn set_download_dir(&self, id: &str, dir: Option<String>) -> bool {
+        let dir = dir
+            .map(|dir| dir.trim().to_owned())
+            .filter(|d| !d.is_empty());
+        {
+            let mut devices = self.devices.write().await;
+            let Some(device) = devices.get_mut(id) else {
+                tracing::debug!(device = %id, "download dir change for an unknown device");
+                return false;
+            };
+            if device.download_dir == dir {
+                return false;
+            }
+            device.download_dir = dir;
+        }
+        self.persist_device(id).await;
+        true
+    }
+
+    /// Per-device cap for incoming shared files, if it overrides the global one.
+    pub async fn max_incoming_size(&self, id: &str) -> Option<u64> {
+        self.devices
+            .read()
+            .await
+            .get(id)
+            .and_then(|device| device.max_incoming_size)
+    }
+
     /// Updates the last known address of a trusted device. Only the in-memory
     /// entry and the persisted file are touched when the address changed.
     /// Returns whether it changed.
@@ -329,6 +377,8 @@ mod tests {
             name: "Phone".to_owned(),
             cert_sha256: Some("deadbeef".to_owned()),
             last_ip: Some("192.168.1.20".to_owned()),
+            download_dir: None,
+            max_incoming_size: None,
             plugins,
         }
     }
@@ -520,5 +570,35 @@ mod tests {
     fn fingerprints_are_stable() {
         assert_eq!(fingerprint(b"abc"), fingerprint(b"abc"));
         assert_ne!(fingerprint(b"abc"), fingerprint(b"abd"));
+    }
+
+    #[tokio::test]
+    async fn persists_the_download_dir_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = TrustedStore::load(dir.path());
+        let id = "a".repeat(32);
+        store.insert(phone(&id, HashMap::new())).await;
+
+        assert!(
+            !store
+                .set_download_dir(&"b".repeat(32), Some("/tmp/x".to_owned()))
+                .await
+        );
+        assert!(
+            store
+                .set_download_dir(&id, Some("/tmp/files".to_owned()))
+                .await
+        );
+        assert_eq!(store.download_dir(&id).await.as_deref(), Some("/tmp/files"));
+
+        let reloaded = TrustedStore::load(dir.path());
+        assert_eq!(
+            reloaded.download_dir(&id).await.as_deref(),
+            Some("/tmp/files")
+        );
+
+        assert!(reloaded.set_download_dir(&id, None).await);
+        let reloaded = TrustedStore::load(dir.path());
+        assert_eq!(reloaded.download_dir(&id).await, None);
     }
 }

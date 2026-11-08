@@ -271,6 +271,17 @@ impl DeviceIface {
             .collect()
     }
 
+    /// Directory where files shared by this device are saved: the per-device
+    /// override, the XDG download dir or `$HOME/Downloads`.
+    #[zbus(property)]
+    async fn download_dir(&self) -> String {
+        self.app
+            .effective_download_dir(&self.device_id)
+            .await
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// Forget the pairing, notifying the peer when it is connected.
     async fn unpair(&self) -> zbus::fdo::Result<()> {
         self.cmd_tx
@@ -304,6 +315,73 @@ impl DeviceIface {
         self.cmd_tx
             .send(UiCommand::FindMyPhone {
                 device_id: self.device_id.clone(),
+                reply,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Share a local file with the device. Fails when the device is not
+    /// paired, the plugin is disabled, it is not connected or the file cannot
+    /// be read.
+    async fn send_file(&self, path: String) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(UiCommand::SendFile {
+                device_id: self.device_id.clone(),
+                path,
+                reply,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Share text with the device. Empty text is ignored.
+    async fn send_text(&self, text: String) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(UiCommand::SendText {
+                device_id: self.device_id.clone(),
+                text,
+                reply,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Share a URL with the device. Empty URLs are ignored.
+    async fn send_url(&self, url: String) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(UiCommand::SendUrl {
+                device_id: self.device_id.clone(),
+                url,
+                reply,
+            })
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        response
+            .await
+            .map_err(|_| zbus::fdo::Error::Failed("daemon stopped".to_owned()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Set where files shared by this device are saved. An empty path clears
+    /// the per-device override.
+    async fn set_download_dir(&self, path: String) -> zbus::fdo::Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(UiCommand::SetDownloadDir {
+                device_id: self.device_id.clone(),
+                dir: path,
                 reply,
             })
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
@@ -390,6 +468,28 @@ impl DeviceIface {
     /// A notification was dismissed, locally or on the phone.
     #[zbus(signal)]
     async fn notification_dismissed(emitter: &SignalEmitter<'_>, id: String) -> zbus::Result<()>;
+
+    /// The device shared text with us; the frontend decides how to show it.
+    #[zbus(signal)]
+    async fn text_received(emitter: &SignalEmitter<'_>, text: String) -> zbus::Result<()>;
+
+    /// The device shared a URL with us; the frontend decides how to open it.
+    #[zbus(signal)]
+    async fn url_received(emitter: &SignalEmitter<'_>, url: String) -> zbus::Result<()>;
+
+    /// A shared file finished downloading; `path` is its absolute location.
+    #[zbus(signal)]
+    async fn file_received(emitter: &SignalEmitter<'_>, path: String) -> zbus::Result<()>;
+
+    /// Progress of an incoming multi-file share.
+    #[zbus(signal)]
+    async fn share_progress(
+        emitter: &SignalEmitter<'_>,
+        bytes: u64,
+        total_bytes: u64,
+        files: u32,
+        total_files: u32,
+    ) -> zbus::Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +588,7 @@ enum DeviceProperty {
     BatteryLevel,
     IsCharging,
     SignalStrengths,
+    DownloadDir,
 }
 
 /// Emits `PropertiesChanged` for one device property, reading the new value
@@ -521,6 +622,7 @@ async fn emit_property_changed(conn: &zbus::Connection, device_id: &str, propert
         DeviceProperty::BatteryLevel => iface.battery_level_changed(emitter).await,
         DeviceProperty::IsCharging => iface.is_charging_changed(emitter).await,
         DeviceProperty::SignalStrengths => iface.signal_strengths_changed(emitter).await,
+        DeviceProperty::DownloadDir => iface.download_dir_changed(emitter).await,
     };
     if let Err(e) = result {
         tracing::warn!(
@@ -690,6 +792,50 @@ async fn event_loop(
                     tracing::warn!(device = %device_id, error = %e, "failed to emit ClipboardReceived");
                 }
             }
+            Event::ShareTextReceived { device_id, text } => {
+                let Some(emitter) = device_emitter(&conn, &device_id) else {
+                    continue;
+                };
+                if let Err(e) = DeviceIface::text_received(&emitter, text).await {
+                    tracing::warn!(device = %device_id, error = %e, "failed to emit TextReceived");
+                }
+            }
+            Event::ShareUrlReceived { device_id, url } => {
+                let Some(emitter) = device_emitter(&conn, &device_id) else {
+                    continue;
+                };
+                if let Err(e) = DeviceIface::url_received(&emitter, url).await {
+                    tracing::warn!(device = %device_id, error = %e, "failed to emit UrlReceived");
+                }
+            }
+            Event::ShareFileReceived { device_id, path } => {
+                let Some(emitter) = device_emitter(&conn, &device_id) else {
+                    continue;
+                };
+                if let Err(e) = DeviceIface::file_received(&emitter, path).await {
+                    tracing::warn!(device = %device_id, error = %e, "failed to emit FileReceived");
+                }
+            }
+            Event::ShareProgress {
+                device_id,
+                bytes,
+                total_bytes,
+                files,
+                total_files,
+            } => {
+                let Some(emitter) = device_emitter(&conn, &device_id) else {
+                    continue;
+                };
+                if let Err(e) =
+                    DeviceIface::share_progress(&emitter, bytes, total_bytes, files, total_files)
+                        .await
+                {
+                    tracing::warn!(device = %device_id, error = %e, "failed to emit ShareProgress");
+                }
+            }
+            Event::DownloadDirChanged { device_id } => {
+                emit_property_changed(&conn, &device_id, DeviceProperty::DownloadDir).await;
+            }
         }
     }
 }
@@ -766,6 +912,8 @@ mod tests {
                 name: "Phone".to_owned(),
                 cert_sha256: None,
                 last_ip: None,
+                download_dir: None,
+                max_incoming_size: None,
                 plugins: std::collections::HashMap::from([("kdeconnect.ping".to_owned(), false)]),
             })
             .await;
@@ -803,6 +951,8 @@ mod tests {
                 name: "Phone".to_owned(),
                 cert_sha256: None,
                 last_ip: None,
+                download_dir: None,
+                max_incoming_size: None,
                 plugins,
             })
             .await;

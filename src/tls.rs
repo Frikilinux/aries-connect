@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme,
+};
 use rustls_pki_types::{
     pem::PemObject, CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
 };
@@ -164,6 +167,76 @@ pub fn client_config(cert: &IdentityCertificate) -> io::Result<ClientConfig> {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
         .with_client_auth_cert(vec![cert.cert.clone()], cert.key.clone_key())
+        .map_err(io::Error::other)?;
+    Ok(config)
+}
+
+/// Accepts any client certificate, like [`AcceptAnyCert`] does for servers.
+/// Trust is established by the control channel and the pairing flow.
+#[derive(Debug)]
+struct AcceptAnyClientCert;
+
+impl ClientCertVerifier for AcceptAnyClientCert {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+        ]
+    }
+}
+
+/// TLS server configuration for the payload channel when this daemon is the
+/// file **sender**: present our certificate and accept the peer's client cert.
+pub fn server_config(cert: &IdentityCertificate) -> io::Result<ServerConfig> {
+    let config = ServerConfig::builder()
+        .with_client_cert_verifier(Arc::new(AcceptAnyClientCert))
+        .with_single_cert(vec![cert.cert.clone()], cert.key.clone_key())
         .map_err(io::Error::other)?;
     Ok(config)
 }

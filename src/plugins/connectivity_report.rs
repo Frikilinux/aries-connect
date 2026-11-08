@@ -187,6 +187,8 @@ mod tests {
                 name: "Phone".to_owned(),
                 cert_sha256: None,
                 last_ip: None,
+                download_dir: None,
+                max_incoming_size: None,
                 plugins,
             })
             .await;

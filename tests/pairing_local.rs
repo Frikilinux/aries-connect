@@ -61,6 +61,7 @@ async fn spawn_daemon() -> (Arc<App>, u16, UnboundedReceiver<Event>) {
         events_tx,
         aries_connect::trusted::TrustedStore::in_memory(),
     );
+    app.set_certificate(cert).await;
 
     let port = aries_connect::core::network::spawn(app.clone(), connector, 0)
         .await
@@ -849,4 +850,133 @@ async fn unpaired_peer_is_told_to_unpair() {
         Some(false),
         "an unpaired peer that still sends plugin packets must be told to unpair"
     );
+}
+
+#[tokio::test]
+async fn share_text_and_url_reach_the_phone() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    app.mark_paired(PHONE_ID).await;
+
+    app.send_share_text(PHONE_ID, "Hello from the desktop")
+        .await
+        .expect("text delivered");
+    let packet = tokio::time::timeout(Duration::from_secs(5), read_packet(&mut reader))
+        .await
+        .expect("text reaches the phone");
+    assert_eq!(packet.packet_type, "kdeconnect.share.request");
+    assert_eq!(
+        packet.body.get("text").and_then(|v| v.as_str()),
+        Some("Hello from the desktop")
+    );
+
+    app.send_share_url(PHONE_ID, "https://kdeconnect.kde.org")
+        .await
+        .expect("url delivered");
+    let packet = tokio::time::timeout(Duration::from_secs(5), read_packet(&mut reader))
+        .await
+        .expect("url reaches the phone");
+    assert_eq!(packet.packet_type, "kdeconnect.share.request");
+    assert_eq!(
+        packet.body.get("url").and_then(|v| v.as_str()),
+        Some("https://kdeconnect.kde.org")
+    );
+}
+
+#[tokio::test]
+async fn shared_text_and_url_from_the_phone_are_surfaced() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+
+    let text = NetworkPacket::new(
+        "kdeconnect.share.request",
+        serde_json::json!({ "text": "from the phone" }),
+    );
+    send_packet(&mut reader, &text).await;
+    match wait_event(&mut events, |e| {
+        matches!(e, Event::ShareTextReceived { .. })
+    })
+    .await
+    {
+        Event::ShareTextReceived { device_id, text } => {
+            assert_eq!(device_id, PHONE_ID);
+            assert_eq!(text, "from the phone");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let url = NetworkPacket::new(
+        "kdeconnect.share.request",
+        serde_json::json!({ "url": "https://example.com" }),
+    );
+    send_packet(&mut reader, &url).await;
+    match wait_event(&mut events, |e| matches!(e, Event::ShareUrlReceived { .. })).await {
+        Event::ShareUrlReceived { device_id, url } => {
+            assert_eq!(device_id, PHONE_ID);
+            assert_eq!(url, "https://example.com");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn incoming_share_file_is_written_to_the_configured_dir() {
+    let (app, port, mut events) = spawn_daemon().await;
+    let mut reader = phone_handshake(port).await;
+    wait_event(&mut events, |e| matches!(e, Event::Connected { .. })).await;
+    app.mark_paired(PHONE_ID).await;
+
+    let dir = tempfile::tempdir().expect("download dir");
+    app.trusted
+        .set_download_dir(PHONE_ID, Some(dir.path().to_string_lossy().into_owned()))
+        .await;
+
+    // The phone serves the payload over TLS on an ephemeral listener.
+    let phone_dir = tempfile::tempdir().expect("phone payload cert dir");
+    let phone_cert = IdentityCertificate::load_or_create(phone_dir.path().to_owned())
+        .await
+        .expect("phone payload certificate");
+    let acceptor = TlsAcceptor::from(Arc::new(
+        aries_connect::tls::server_config(&phone_cert).expect("payload server config"),
+    ));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("payload listener");
+    let payload_port = listener.local_addr().expect("payload addr").port();
+    let payload = b"shared bytes".to_vec();
+    let served = payload.clone();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("payload accept");
+        let mut socket = acceptor.accept(tcp).await.expect("payload TLS");
+        socket.write_all(&served).await.expect("write payload");
+        socket.shutdown().await.ok();
+    });
+
+    let request = NetworkPacket::new(
+        "kdeconnect.share.request",
+        serde_json::json!({
+            "filename": "hello.txt",
+            "numberOfFiles": 1,
+            "totalPayloadSize": payload.len(),
+        }),
+    )
+    .with_payload(payload.len() as u64, payload_port);
+    send_packet(&mut reader, &request).await;
+
+    match wait_event(&mut events, |e| {
+        matches!(e, Event::ShareFileReceived { .. })
+    })
+    .await
+    {
+        Event::ShareFileReceived { device_id, path } => {
+            assert_eq!(device_id, PHONE_ID);
+            assert_eq!(std::fs::read(&path).expect("received file"), payload);
+            assert!(std::path::Path::new(&path).starts_with(dir.path()));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
 }

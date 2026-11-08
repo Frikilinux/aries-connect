@@ -189,6 +189,8 @@ async fn handle_connection(
     connector: TlsConnector,
     mut stream: TcpStream,
 ) -> Result<(), io::Error> {
+    // The peer address is needed to fetch file payloads shared by the phone.
+    let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip());
     // --- 1. Plaintext identity from the connecting peer -------------------
     let plain_line =
         read_plain_line(&mut stream, MAX_IDENTITY_BYTES, PLAINTEXT_IDENTITY_TIMEOUT).await?;
@@ -339,7 +341,7 @@ async fn handle_connection(
                     continue;
                 }
             };
-            dispatch(&app, Some(peer_id.clone()), packet).await;
+            dispatch(&app, Some(peer_id.clone()), peer_ip, packet).await;
         }
         Ok::<(), io::Error>(())
     }
@@ -371,7 +373,12 @@ fn parse_json(bytes: &[u8], what: &str) -> io::Result<NetworkPacket> {
 }
 
 /// Routes one packet to its handler.
-async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket) {
+async fn dispatch(
+    app: &Arc<App>,
+    peer_id: Option<String>,
+    peer_ip: Option<std::net::IpAddr>,
+    packet: NetworkPacket,
+) {
     // A peer that is not in the trust store but keeps sending plugin packets
     // still believes it is paired: this happens when the desktop unpairs while
     // the phone is offline, so the `pair: false` notification was lost. Tell
@@ -422,6 +429,9 @@ async fn dispatch(app: &Arc<App>, peer_id: Option<String>, packet: NetworkPacket
         }
         "kdeconnect.ping" => {
             crate::plugins::ping::handle_packet(app, peer_id.as_deref(), &packet).await;
+        }
+        "kdeconnect.share.request" | "kdeconnect.share.request.update" => {
+            crate::plugins::share::handle_packet(app, peer_id.as_deref(), peer_ip, &packet).await;
         }
         other => {
             tracing::debug!(unknown = other, "ignoring unsupported packet type");
