@@ -24,7 +24,7 @@ control channel and exposes devices, pairing and events over D-Bus
 - [x] Clipboard (`kdeconnect.clipboard`)
 - [x] Connectivity report (`kdeconnect.connectivity_report`)
 - [x] Find my phone (`kdeconnect.findmyphone.request`)
-- [ ] Share (`kdeconnect.share.request`)
+- [x] Share (`kdeconnect.share.request`)
 
 ## Requirements
 

@@ -125,6 +125,9 @@ async fn main() {
         trusted,
         config,
     );
+    // The payload channel reuses the identity certificate of the control
+    // channel, so hand it to the shared state before starting the network.
+    app.set_certificate(cert).await;
     app.seed_trusted().await;
 
     // D-Bus service + command loop.

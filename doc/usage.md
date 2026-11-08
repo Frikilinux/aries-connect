@@ -36,16 +36,20 @@ State lives in `$AC_DATA_DIR` (default `~/.local/share/aries-connect/`):
 | `device_id`              | 32-character KDE Connect device id              |
 | `devices/<id>/device.json` | One paired device: name, certificate SHA-256 fingerprint, last known IPv4 and per-plugin overrides |
 
-`config.json` only stores an override for the name announced to other devices:
+`config.json` stores the name announced to other devices and optional global
+defaults:
 
 ```json
 {
-  "deviceName": "My Desktop"
+  "deviceName": "My Desktop",
+  "maxIncomingSize": 524288000
 }
 ```
 
-When `deviceName` is absent, `null` or blank, the host name is used. The file is
-optional: the daemon starts with the host name when it does not exist.
+When `deviceName` is absent, `null` or blank, the host name is used.
+`maxIncomingSize` is the global cap for incoming shared files, in bytes
+(default 500 MiB). The file is optional: the daemon starts with the defaults
+when it does not exist.
 
 `device.json` example:
 
@@ -55,12 +59,16 @@ optional: the daemon starts with the host name when it does not exist.
   "name": "motorola edge 40",
   "cert_sha256": "f5d6a9f0...",
   "last_ip": "172.16.1.134",
-  "plugins": {}
+  "plugins": {},
+  "downloadDir": "/home/me/Downloads/phone",
+  "maxIncomingSize": 104857600
 }
 ```
 
 `plugins` lists only toggled plugins (`{"kdeconnect.notification": false}`);
-anything absent is enabled. A legacy monolithic `trusted_devices.json` is
+anything absent is enabled. `downloadDir` overrides where files shared by that
+device are saved (absent → XDG download directory), and `maxIncomingSize`
+overrides the global size cap for that device, in bytes. A legacy monolithic `trusted_devices.json` is
 migrated into `devices/` automatically on the first start and removed
 afterwards. Unpairing deletes the whole `devices/<id>/` directory.
 
@@ -169,6 +177,45 @@ or it is not connected.
 The daemon has no audio output, so requests received from a phone are consumed
 without ringing; a frontend can implement that direction on top of the
 protocol. The plugin can be toggled with `SetPluginEnabled` like any other.
+
+## Share
+
+Share files, text and URLs with a paired device:
+
+```sh
+# Text
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device SendText s "hola"
+
+# URL
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device SendUrl s "https://kdeconnect.kde.org"
+
+# File
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device SendFile s "/home/me/photo.png"
+```
+
+Incoming content is surfaced with `TextReceived(text)`, `UrlReceived(url)` and
+`FileReceived(path)`; the frontend decides how to show/open it. Received files
+are saved to `DownloadDir` (per-device `downloadDir`, else the XDG download
+directory, else `$HOME/Downloads`, created on demand) and capped by
+`maxIncomingSize` (per-device, then global, then 500 MiB). Multi-file transfers
+report progress with `ShareProgress`.
+
+`SetDownloadDir` changes the destination for one device:
+
+```sh
+busctl --user call dev.zotta.AriesConnect \
+  /dev/zotta/AriesConnect/Device/<id> \
+  dev.zotta.AriesConnect.Device SetDownloadDir s "/home/me/Downloads/phone"
+```
+
+The daemon never opens files or URLs; a client can offer `xdg-open <path>` and
+`xdg-open <dirname(path)>`.
 
 ## Troubleshooting
 

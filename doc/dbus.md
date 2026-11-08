@@ -78,6 +78,7 @@ All properties are read-only.
 | `BatteryLevel` | `i` | Last reported charge (`0..=100`), or `-1` when unknown |
 | `IsCharging` | `b` | Whether the device reported that it is charging |
 | `SignalStrengths` | `a{s(si)}` | Coarse signal strength per subscription (SIM): id → `(networkType, level)`, level `0..=4` |
+| `DownloadDir` | `s` | Where files shared by this device are saved: per-device override, else the XDG download directory |
 
 Changes are announced with `org.freedesktop.DBus.Properties.PropertiesChanged`
 on the device object. `Plugins` always lists every plugin the daemon
@@ -94,6 +95,10 @@ implements; plugins absent from `devices/<id>/device.json` count as enabled.
 | `SendClipboardConnect(text, timestamp)` | `sx` | Sends `kdeconnect.clipboard.connect` with the clipboard timestamp |
 | `DismissNotification(notificationId)` | `s` | Dismisses a notification locally and on the phone; fails for unpaired devices, inactive notifications or a disabled plugin |
 | `SetPluginEnabled(plugin, enabled)` | `sb` | Enables or disables a plugin; fails for unsupported plugins |
+| `SendFile(path)` | `s` | Shares a local file over a payload channel; fails for unpaired/disabled/offline devices or an unreadable file |
+| `SendText(text)` | `s` | Shares text; empty text is ignored |
+| `SendUrl(url)` | `s` | Shares a URL; empty URLs are ignored |
+| `SetDownloadDir(path)` | `s` | Sets where files shared by this device are saved. An empty path clears the per-device override |
 
 ### Signals
 
@@ -103,6 +108,10 @@ implements; plugins absent from `devices/<id>/device.json` count as enabled.
 | `ClipboardReceived` | `(content, timestamp)` | The device clipboard changed; `timestamp` is `0` for regular updates and the connection timestamp for `clipboard.connect` |
 | `NotificationReceived` | `(id, appName, title, text)` | The phone posted a notification |
 | `NotificationDismissed` | `(id)` | A notification was dismissed, locally or on the phone |
+| `TextReceived` | `(text)` | The device shared text; the frontend decides how to show it |
+| `UrlReceived` | `(url)` | The device shared a URL; the frontend decides how to open it |
+| `FileReceived` | `(path)` | A shared file finished downloading; `path` is its absolute location |
+| `ShareProgress` | `(bytes, totalBytes, files, totalFiles)` | Progress of an incoming multi-file share |
 
 Client-side proxies are bound to a path, so a client that uses proxies creates
 one per device. A raw message stream (or `busctl monitor`) can instead filter
@@ -258,6 +267,32 @@ On Android 10+ the phone cannot read the clipboard in the background without
 special permissions, so automatic phone-to-desktop sync may require the
 “Send clipboard” action in the KDE Connect app; desktop-to-phone sync works
 normally.
+
+## Share
+
+Files, text and URLs can be shared in both directions (`kdeconnect.share`).
+
+Outgoing:
+
+- `SendText(text)` and `SendUrl(url)` send a `kdeconnect.share.request`; empty
+  values are ignored.
+- `SendFile(path)` announces the file over the control channel and serves its
+  bytes over a TLS payload connection (same certificate as the control channel).
+  It fails for unpaired, disabled or offline devices or unreadable files.
+
+Incoming:
+
+- `TextReceived(text)` and `UrlReceived(url)` notify the frontend. The daemon
+  never opens or displays them.
+- Files are written to `DownloadDir` (per-device override → XDG download dir →
+  `$HOME/Downloads`, created on demand). `FileReceived(path)` reports the saved
+  file and `ShareProgress` reports batch progress. The frontend is responsible
+  for offering “open with xdg-open” and “open the containing directory”, or
+  dismissing the notification.
+
+The size limit is configured only through files: `maxIncomingSize` in
+`devices/<id>/device.json` (per device) or in `config.json` (global), in bytes,
+defaulting to 500 MiB.
 
 ## Notifications
 

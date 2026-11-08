@@ -2,6 +2,7 @@
 //! pairing requests.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -15,7 +16,12 @@ use crate::plugins::connectivity_report::{self, ConnectivityStore};
 use crate::plugins::find_my_phone;
 use crate::plugins::notifications::{self, NotificationStore};
 use crate::plugins::ping;
+use crate::plugins::share;
+use crate::tls::IdentityCertificate;
 use crate::trusted::{TrustedDevice, TrustedStore};
+
+/// Default cap for incoming shared files, in bytes (500 MiB).
+pub const DEFAULT_MAX_INCOMING_SIZE: u64 = 500 * 1024 * 1024;
 
 /// Events pushed toward D-Bus.
 #[derive(Debug, Clone)]
@@ -69,6 +75,22 @@ pub enum Event {
     /// an unpaired device, so the device object is kept and only `Paired`
     /// changes.
     PairingRemoved { id: String },
+    /// A paired device shared text with us.
+    ShareTextReceived { device_id: String, text: String },
+    /// A paired device shared a URL with us.
+    ShareUrlReceived { device_id: String, url: String },
+    /// A shared file finished downloading; `path` is its absolute location.
+    ShareFileReceived { device_id: String, path: String },
+    /// Progress of an incoming multi-file share (bytes and files so far).
+    ShareProgress {
+        device_id: String,
+        bytes: u64,
+        total_bytes: u64,
+        files: u32,
+        total_files: u32,
+    },
+    /// The per-device download directory changed.
+    DownloadDirChanged { device_id: String },
     /// The name this daemon announces to other devices changed.
     LocalNameChanged { name: String },
 }
@@ -116,6 +138,30 @@ pub enum UiCommand {
         name: String,
         /// Effective name after the change, sent back to the D-Bus caller.
         reply: oneshot::Sender<Result<(), DeviceNameError>>,
+    },
+    SendFile {
+        device_id: String,
+        path: String,
+        /// Result of the delivery attempt, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), SendShareError>>,
+    },
+    SendText {
+        device_id: String,
+        text: String,
+        /// Result of the delivery attempt, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), SendShareError>>,
+    },
+    SendUrl {
+        device_id: String,
+        url: String,
+        /// Result of the delivery attempt, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), SendShareError>>,
+    },
+    SetDownloadDir {
+        device_id: String,
+        dir: String,
+        /// Result of the change, sent back to the D-Bus caller.
+        reply: oneshot::Sender<Result<(), DownloadDirError>>,
     },
 }
 
@@ -243,6 +289,122 @@ impl std::fmt::Display for DeviceNameError {
 }
 
 impl std::error::Error for DeviceNameError {}
+
+/// Why a share request could not be delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendShareError {
+    /// The device is unknown or not paired.
+    NotPaired,
+    /// The `kdeconnect.share.request` plugin is disabled for the device.
+    PluginDisabled,
+    /// The device has no active control channel.
+    NotConnected,
+    /// The local file is missing, unreadable or the payload could not be set up.
+    FileError,
+}
+
+impl std::fmt::Display for SendShareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::NotPaired => "device is not paired",
+            Self::PluginDisabled => "kdeconnect.share.request is disabled for this device",
+            Self::NotConnected => "device has no active control channel",
+            Self::FileError => "cannot read the file or set up the transfer",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for SendShareError {}
+
+/// Why a download directory change was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadDirError {
+    /// The device is unknown or not paired.
+    UnknownDevice,
+}
+
+impl std::fmt::Display for DownloadDirError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownDevice => f.write_str("device is not paired"),
+        }
+    }
+}
+
+impl std::error::Error for DownloadDirError {}
+
+/// Progress of an incoming share batch for one device.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShareBatch {
+    /// Bytes of completed files plus the current transfer.
+    pub bytes_done: u64,
+    /// Files already written to disk.
+    pub files_done: u32,
+    /// Total bytes announced for the batch.
+    pub total_bytes: u64,
+    /// Total files announced for the batch.
+    pub total_files: u32,
+}
+
+/// Per-device progress of incoming share batches.
+#[derive(Default)]
+pub struct ShareStore {
+    inner: RwLock<HashMap<String, ShareBatch>>,
+}
+
+impl ShareStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current batch state, or a zeroed one when no batch is in progress.
+    pub async fn get(&self, device_id: &str) -> ShareBatch {
+        self.inner
+            .read()
+            .await
+            .get(device_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Sets the announced batch totals, keeping any progress already recorded.
+    pub async fn ensure_batch(
+        &self,
+        device_id: &str,
+        total_files: u32,
+        total_bytes: u64,
+    ) -> ShareBatch {
+        let mut map = self.inner.write().await;
+        let entry = map.entry(device_id.to_owned()).or_default();
+        if total_files > 0 {
+            entry.total_files = total_files;
+        }
+        if total_bytes > 0 {
+            entry.total_bytes = total_bytes;
+        }
+        *entry
+    }
+
+    /// Records one finished file and returns the updated batch. The batch is
+    /// cleared once every announced file has been received.
+    pub async fn file_done(&self, device_id: &str, size: u64) -> ShareBatch {
+        let mut map = self.inner.write().await;
+        let entry = map.entry(device_id.to_owned()).or_default();
+        entry.files_done += 1;
+        entry.bytes_done += size;
+        let snapshot = *entry;
+        if snapshot.total_files > 0 && snapshot.files_done >= snapshot.total_files {
+            map.remove(device_id);
+        }
+        snapshot
+    }
+
+    /// Drops the batch state of a device.
+    pub async fn clear_device(&self, device_id: &str) {
+        self.inner.write().await.remove(device_id);
+    }
+}
 
 /// Registry of known devices.
 pub struct DeviceRegistry {
@@ -380,6 +542,10 @@ pub struct App {
     pub battery: BatteryStore,
     /// Last reported connectivity report of each device.
     pub connectivity: ConnectivityStore,
+    /// Progress of incoming share batches per device.
+    pub share: ShareStore,
+    /// TLS identity used for payload transfers; set once at startup.
+    certificate: RwLock<Option<Arc<IdentityCertificate>>>,
     /// Pending pairing requests: deviceId -> decision sender.
     pending_pairs: Mutex<HashMap<String, oneshot::Sender<PairDecision>>>,
     /// Latest control channel per device.
@@ -416,11 +582,24 @@ impl App {
             notifications: NotificationStore::new(),
             battery: BatteryStore::new(),
             connectivity: ConnectivityStore::new(),
+            share: ShareStore::new(),
+            certificate: RwLock::new(None),
             pending_pairs: Mutex::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             link_generation: AtomicU64::new(0),
             announce_wakeup: Notify::new(),
         })
+    }
+
+    /// Stores the TLS identity used for payload transfers. Called once at
+    /// startup (and by tests) before any file is shared.
+    pub async fn set_certificate(&self, cert: IdentityCertificate) {
+        *self.certificate.write().await = Some(Arc::new(cert));
+    }
+
+    /// TLS identity used for payload transfers, when configured.
+    pub async fn certificate(&self) -> Option<Arc<IdentityCertificate>> {
+        self.certificate.read().await.clone()
     }
 
     /// Clone of the current local identity.
@@ -541,6 +720,8 @@ impl App {
                 name,
                 cert_sha256,
                 last_ip: None,
+                download_dir: None,
+                max_incoming_size: None,
                 plugins: HashMap::new(),
             })
             .await;
@@ -672,6 +853,158 @@ impl App {
             return Err(FindMyPhoneError::NotConnected);
         }
         Ok(())
+    }
+
+    /// Sends text to a device as a `kdeconnect.share.request`. Empty text is
+    /// ignored. Fails when the device is not paired, the plugin is disabled
+    /// or there is no control channel.
+    pub async fn send_share_text(&self, device_id: &str, text: &str) -> Result<(), SendShareError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.send_share(device_id, share::text_packet(text)).await
+    }
+
+    /// Sends a URL to a device as a `kdeconnect.share.request`. Empty URLs are
+    /// ignored.
+    pub async fn send_share_url(&self, device_id: &str, url: &str) -> Result<(), SendShareError> {
+        if url.is_empty() {
+            return Ok(());
+        }
+        self.send_share(device_id, share::url_packet(url)).await
+    }
+
+    async fn send_share(
+        &self,
+        device_id: &str,
+        packet: NetworkPacket,
+    ) -> Result<(), SendShareError> {
+        if self.trusted.get(device_id).await.is_none() {
+            tracing::debug!(device = %device_id, "cannot share to an unpaired device");
+            return Err(SendShareError::NotPaired);
+        }
+        if !self
+            .trusted
+            .plugin_enabled(device_id, share::SHARE_PACKET)
+            .await
+        {
+            tracing::debug!(device = %device_id, "share plugin is disabled for this device");
+            return Err(SendShareError::PluginDisabled);
+        }
+        if !self.send_packet(device_id, &packet).await {
+            tracing::debug!(device = %device_id, "no active control channel to share");
+            return Err(SendShareError::NotConnected);
+        }
+        Ok(())
+    }
+
+    /// Sends a local file to a device. The bytes are served over an ephemeral
+    /// payload listener announced in the request. Fails when the device is not
+    /// paired, the plugin is disabled, there is no control channel or the file
+    /// is unreadable.
+    pub async fn send_share_file(&self, device_id: &str, path: &str) -> Result<(), SendShareError> {
+        if self.trusted.get(device_id).await.is_none() {
+            tracing::debug!(device = %device_id, "cannot share to an unpaired device");
+            return Err(SendShareError::NotPaired);
+        }
+        if !self
+            .trusted
+            .plugin_enabled(device_id, share::SHARE_PACKET)
+            .await
+        {
+            tracing::debug!(device = %device_id, "share plugin is disabled for this device");
+            return Err(SendShareError::PluginDisabled);
+        }
+        let path = PathBuf::from(path);
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|_| SendShareError::FileError)?;
+        if !metadata.is_file() {
+            return Err(SendShareError::FileError);
+        }
+        let size = metadata.len();
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(SendShareError::FileError)?
+            .to_owned();
+        let Some(cert) = self.certificate().await else {
+            tracing::warn!(device = %device_id, "no TLS identity configured for payload transfers");
+            return Err(SendShareError::FileError);
+        };
+        let listener = crate::core::payload::bind_payload_listener()
+            .await
+            .map_err(|_| SendShareError::FileError)?;
+        let port = listener
+            .local_addr()
+            .map_err(|_| SendShareError::FileError)?
+            .port();
+        let last_modified = metadata.modified().ok().and_then(|time| {
+            time.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_millis() as i64)
+        });
+        let packet = share::file_packet(&filename, size, port, last_modified);
+        if !self.send_packet(device_id, &packet).await {
+            return Err(SendShareError::NotConnected);
+        }
+        tracing::info!(
+            device = %device_id,
+            filename = %filename,
+            size,
+            "sending shared file"
+        );
+        tokio::spawn(async move {
+            if let Err(e) = crate::core::payload::send_payload(&cert, listener, &path, size).await {
+                tracing::warn!(path = %path.display(), error = %e, "outgoing share failed");
+            }
+        });
+        Ok(())
+    }
+
+    /// Sets (or with an empty `dir` clears) the per-device download directory.
+    pub async fn set_download_dir(
+        &self,
+        device_id: &str,
+        dir: &str,
+    ) -> Result<(), DownloadDirError> {
+        if self.trusted.get(device_id).await.is_none() {
+            return Err(DownloadDirError::UnknownDevice);
+        }
+        let dir = dir.trim();
+        let dir = if dir.is_empty() {
+            None
+        } else {
+            Some(dir.to_owned())
+        };
+        if self.trusted.set_download_dir(device_id, dir).await {
+            tracing::info!(device = %device_id, "download directory changed");
+            self.emit(Event::DownloadDirChanged {
+                device_id: device_id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Effective download directory for a device: its override, else the XDG
+    /// download dir, else `$HOME/Downloads`. The directory is created if it
+    /// does not exist.
+    pub async fn effective_download_dir(&self, device_id: &str) -> std::io::Result<PathBuf> {
+        let dir = match self.trusted.download_dir(device_id).await {
+            Some(dir) => PathBuf::from(dir),
+            None => default_download_dir(),
+        };
+        tokio::fs::create_dir_all(&dir).await?;
+        Ok(dir)
+    }
+
+    /// Effective cap for incoming shared files, in bytes.
+    pub async fn effective_max_size(&self, device_id: &str) -> u64 {
+        self.trusted
+            .max_incoming_size(device_id)
+            .await
+            .or_else(|| self.config.max_incoming_size())
+            .unwrap_or(DEFAULT_MAX_INCOMING_SIZE)
     }
 
     /// Persists the per-device plugin state. Disabling a plugin also drops its
@@ -824,6 +1157,16 @@ impl App {
     }
 }
 
+/// XDG download directory, falling back to `$HOME/Downloads` and finally the
+/// current directory.
+fn default_download_dir() -> PathBuf {
+    dirs::download_dir().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Downloads")
+    })
+}
+
 /// Loop consuming UI commands and translating them into decisions.
 pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiCommand>) {
     while let Some(cmd) = rx.recv().await {
@@ -884,6 +1227,54 @@ pub async fn command_loop(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<UiComma
                 let result = app.send_find_my_phone(&device_id).await;
                 if let Err(e) = &result {
                     tracing::warn!(device = %device_id, error = %e, "cannot find my phone");
+                }
+                let _ = reply.send(result);
+            }
+            UiCommand::SendFile {
+                device_id,
+                path,
+                reply,
+            } => {
+                tracing::info!(device = %device_id, path = %path, "send_file");
+                let result = app.send_share_file(&device_id, &path).await;
+                if let Err(e) = &result {
+                    tracing::warn!(device = %device_id, error = %e, "cannot share file");
+                }
+                let _ = reply.send(result);
+            }
+            UiCommand::SendText {
+                device_id,
+                text,
+                reply,
+            } => {
+                tracing::info!(device = %device_id, "send_text");
+                let result = app.send_share_text(&device_id, &text).await;
+                if let Err(e) = &result {
+                    tracing::warn!(device = %device_id, error = %e, "cannot share text");
+                }
+                let _ = reply.send(result);
+            }
+            UiCommand::SendUrl {
+                device_id,
+                url,
+                reply,
+            } => {
+                tracing::info!(device = %device_id, "send_url");
+                let result = app.send_share_url(&device_id, &url).await;
+                if let Err(e) = &result {
+                    tracing::warn!(device = %device_id, error = %e, "cannot share url");
+                }
+                let _ = reply.send(result);
+            }
+            UiCommand::SetDownloadDir {
+                device_id,
+                dir,
+                reply,
+            } => {
+                tracing::info!(device = %device_id, dir = %dir, "set_download_dir");
+                let result = app.set_download_dir(&device_id, &dir).await;
+                if let Err(e) = &result {
+                    tracing::warn!(device = %device_id, error = %e, "cannot set download directory");
                 }
                 let _ = reply.send(result);
             }
@@ -1121,6 +1512,8 @@ mod tests {
                 name: "Phone".to_owned(),
                 cert_sha256: None,
                 last_ip: None,
+                download_dir: None,
+                max_incoming_size: None,
                 plugins: HashMap::new(),
             })
             .await;
@@ -1144,6 +1537,8 @@ mod tests {
                 name: "Phone".to_owned(),
                 cert_sha256: None,
                 last_ip: None,
+                download_dir: None,
+                max_incoming_size: None,
                 plugins: HashMap::new(),
             })
             .await;
@@ -1292,9 +1687,61 @@ mod tests {
                 name: "Phone".to_owned(),
                 cert_sha256: None,
                 last_ip: None,
+                download_dir: None,
+                max_incoming_size: None,
                 plugins: HashMap::new(),
             })
             .await;
         (app, device_id, events_rx)
+    }
+
+    #[tokio::test]
+    async fn effective_download_dir_uses_the_device_override() {
+        let (app, device_id, _events) = app_with_phone().await;
+        let dir = tempfile::tempdir().expect("download dir");
+        app.trusted
+            .set_download_dir(&device_id, Some(dir.path().to_string_lossy().into_owned()))
+            .await;
+
+        let effective = app.effective_download_dir(&device_id).await.expect("dir");
+        assert_eq!(effective, dir.path());
+        assert!(effective.is_dir(), "the download dir is created on demand");
+    }
+
+    #[tokio::test]
+    async fn effective_max_size_prefers_the_device_override() {
+        let dir = tempfile::tempdir().expect("config dir");
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"maxIncomingSize": 2048}"#,
+        )
+        .expect("config file");
+        let config = ConfigStore::load(dir.path(), "Desktop".to_owned());
+        let local = LocalIdentity::new("a".repeat(32), "Desktop".to_owned(), 1716);
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let app = App::with_config(local, events, TrustedStore::in_memory(), config);
+        let device_id = "b".repeat(32);
+        app.trusted
+            .insert(TrustedDevice {
+                id: device_id.clone(),
+                name: "Phone".to_owned(),
+                cert_sha256: None,
+                last_ip: None,
+                download_dir: None,
+                max_incoming_size: Some(1024),
+                plugins: HashMap::new(),
+            })
+            .await;
+
+        assert_eq!(app.effective_max_size(&device_id).await, 1024);
+    }
+
+    #[tokio::test]
+    async fn effective_max_size_defaults_to_500mib() {
+        let (app, device_id, _events) = app_with_phone().await;
+        assert_eq!(
+            app.effective_max_size(&device_id).await,
+            DEFAULT_MAX_INCOMING_SIZE
+        );
     }
 }

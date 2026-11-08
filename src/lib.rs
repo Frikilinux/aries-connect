@@ -9,6 +9,7 @@ pub mod core {
     pub mod discovery;
     pub mod network;
     pub mod pairing;
+    pub mod payload;
 }
 pub mod dbus;
 pub mod identity;

@@ -205,6 +205,47 @@ example when its clipboard plugin is disabled. On Android 10+ the phone cannot
 read the clipboard in the background without extra permissions, so automatic
 phone-to-desktop sync may require the manual “Send clipboard” action.
 
+## Share
+
+`kdeconnect.share` shares files, text and URLs. Text and URLs travel in the
+packet body:
+
+```json
+{ "id": 0, "type": "kdeconnect.share.request", "body": { "text": "hola" } }
+{ "id": 0, "type": "kdeconnect.share.request", "body": { "url": "https://…" } }
+```
+
+Files are announced with metadata and a **separate TLS payload channel** (the
+same identity certificate and pinning as the control channel):
+
+```json
+{
+  "id": 0,
+  "type": "kdeconnect.share.request",
+  "body": {
+    "filename": "image.png",
+    "numberOfFiles": 1,
+    "totalPayloadSize": 882,
+    "lastModified": 1700000000000,
+    "open": false
+  },
+  "payloadSize": 882,
+  "payloadTransferInfo": { "port": 1739 }
+}
+```
+
+The sender is the TLS **server** on the announced port and the receiver is the
+TLS **client**: it connects, completes the handshake with the device certificate
+and reads exactly `payloadSize` bytes. Multi-file shares send one packet per file
+plus a `kdeconnect.share.request.update` with `numberOfFiles` and
+`totalPayloadSize`.
+
+AriesConnect stores incoming files (it never opens them) and surfaces text, URLs,
+files and progress over D-Bus. It advertises `kdeconnect.share.request` in both
+directions and accepts packets only from paired devices with the plugin enabled.
+Filenames are reduced to a single safe path component and incoming files are
+capped by a configurable size limit (500 MiB by default).
+
 ## Trust model
 
 - Pairing (`kdeconnect.pair` with `pair: true`) is surfaced to the user as a

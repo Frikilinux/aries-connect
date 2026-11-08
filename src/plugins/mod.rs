@@ -7,6 +7,7 @@ pub mod connectivity_report;
 pub mod find_my_phone;
 pub mod notifications;
 pub mod ping;
+pub mod share;
 
 /// Plugins implemented by this daemon.
 ///
@@ -19,6 +20,7 @@ pub const SUPPORTED_PLUGINS: &[&str] = &[
     find_my_phone::FIND_MY_PHONE_PACKET,
     notifications::NOTIFICATION_PACKET,
     ping::PING_PACKET,
+    share::SHARE_PACKET,
 ];
 
 /// Plugins implemented by this daemon.

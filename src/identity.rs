@@ -16,6 +16,13 @@ pub const PROTOCOL_VERSION: i64 = 8;
 // Generic packet
 // ---------------------------------------------------------------------------
 
+/// Channel negotiated for a binary payload (file transfers, album art, ...).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PayloadTransferInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkPacket {
     #[serde(default)]
@@ -24,6 +31,20 @@ pub struct NetworkPacket {
     pub packet_type: String,
     #[serde(default)]
     pub body: serde_json::Value,
+    /// Size of the binary payload that follows on the payload channel.
+    #[serde(
+        rename = "payloadSize",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub payload_size: Option<u64>,
+    /// Where to connect to fetch the payload.
+    #[serde(
+        rename = "payloadTransferInfo",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub payload_transfer_info: Option<PayloadTransferInfo>,
 }
 
 impl NetworkPacket {
@@ -32,7 +53,16 @@ impl NetworkPacket {
             id: now_ms(),
             packet_type: packet_type.into(),
             body,
+            payload_size: None,
+            payload_transfer_info: None,
         }
+    }
+
+    /// Marks this packet as carrying `size` payload bytes fetched from `port`.
+    pub fn with_payload(mut self, size: u64, port: u16) -> Self {
+        self.payload_size = Some(size);
+        self.payload_transfer_info = Some(PayloadTransferInfo { port: Some(port) });
+        self
     }
 
     /// Serializes the packet with the `\n` framing byte appended (TCP).
@@ -204,5 +234,35 @@ mod tests {
                 crate::plugins::clipboard::CLIPBOARD_CONNECT_PACKET
             );
         }
+    }
+
+    #[test]
+    fn payload_fields_use_the_wire_names() {
+        let packet = NetworkPacket::new("kdeconnect.share.request", serde_json::json!({}))
+            .with_payload(10, 1739);
+        let json: serde_json::Value = serde_json::from_slice(&packet.to_frame()).expect("json");
+
+        assert_eq!(json.get("payloadSize"), Some(&serde_json::json!(10)));
+        assert_eq!(
+            json.get("payloadTransferInfo")
+                .and_then(|info| info.get("port")),
+            Some(&serde_json::json!(1739))
+        );
+        assert!(
+            json.get("payload_size").is_none(),
+            "the snake_case name must not leak onto the wire"
+        );
+    }
+
+    #[test]
+    fn parses_payload_fields_from_wire_json() {
+        let frame = br#"{"id":1,"type":"kdeconnect.share.request","body":{"filename":"a"},"payloadSize":10,"payloadTransferInfo":{"port":1739}}"#;
+        let packet: NetworkPacket = serde_json::from_slice(frame).expect("packet");
+
+        assert_eq!(packet.payload_size, Some(10));
+        assert_eq!(
+            packet.payload_transfer_info.and_then(|info| info.port),
+            Some(1739)
+        );
     }
 }
