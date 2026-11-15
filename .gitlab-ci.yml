@@ -1,8 +1,8 @@
 # GitLab CI for AriesConnect.
 #
 # Mirrors .github/workflows/ci.yml and .github/workflows/release.yml.
-# The GitHub workflows are kept intact (.github/) for reversibility; this
-# file is the active CI while the project lives on GitLab.
+# GitHub is the canonical repository and its workflows are the active CI;
+# this file is kept in stand-by for a possible return to GitLab.
 
 stages:
   - check
